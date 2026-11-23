@@ -1,0 +1,6 @@
+{
+  "name": "LOOPA — Modelador 3D Táctil",
+  "description": "LOOPA es un modelador 3D interactivo para iPad y navegador con modos Objeto y Edición, topología editable real de vértices, aristas y caras, y visor WebGL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
