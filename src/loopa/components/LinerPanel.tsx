@@ -45,6 +45,7 @@ import {
 import {
   CollectionData,
   LightData,
+  MultiresSubdivisionMode,
   ObjectShadingMode,
   ObjectTransform,
   ReferenceImageData,
@@ -58,6 +59,8 @@ import {
   ModifierSlot,
   ModifierType,
 } from '../core/modifiers/types';
+import type { GeometryOperationResourceEstimate } from '../core/mesh/resourceManager';
+import type { ActiveGeometryTaskState } from '../state/useModelerStore';
 import { ModifierStackPanel } from './ModifierStackPanel';
 import { NumericFieldInput } from './NumericFieldInput';
 
@@ -149,6 +152,27 @@ interface LinerPanelProps {
   ngonHighlightDismissed?: boolean;
   onDismissNgonHighlight?: (modifierId: string) => void;
   onRestoreNgonHighlight?: () => void;
+  activeGeometryTask?: ActiveGeometryTaskState | null;
+  onCancelGeometryTask?: () => void;
+  onAddMultiresLevel?: (
+    objectId: string,
+    mode?: MultiresSubdivisionMode,
+    forceConfirm?: boolean,
+  ) => Promise<{
+    ok: boolean;
+    requiresConfirmation?: boolean;
+    estimate?: GeometryOperationResourceEstimate;
+    error?: string;
+  }>;
+  onSetMultiresLevel?: (objectId: string, level: number) => Promise<boolean>;
+  onSetMultiresViewportLevel?: (objectId: string, level: number) => void;
+  onToggleMultiresAutoLod?: (objectId: string, enabled: boolean) => void;
+  onSetMultiresMode?: (
+    objectId: string,
+    mode: MultiresSubdivisionMode,
+  ) => Promise<void>;
+  onDeleteMultiresHigherLevels?: (objectId: string) => void;
+  onApplyMultires?: (objectId: string) => Promise<void>;
   onClose?: () => void;
 }
 
@@ -269,6 +293,15 @@ export const LinerPanel: React.FC<LinerPanelProps> = ({
   ngonHighlightDismissed = false,
   onDismissNgonHighlight,
   onRestoreNgonHighlight,
+  activeGeometryTask = null,
+  onCancelGeometryTask,
+  onAddMultiresLevel,
+  onSetMultiresLevel,
+  onSetMultiresViewportLevel,
+  onToggleMultiresAutoLod,
+  onSetMultiresMode,
+  onDeleteMultiresHigherLevels,
+  onApplyMultires,
   onClose,
 }) => {
   const [activeTab, setActiveTab] = useState<'hierarchy' | 'modifiers'>(
@@ -943,6 +976,15 @@ export const LinerPanel: React.FC<LinerPanelProps> = ({
             ngonHighlightDismissed={ngonHighlightDismissed}
             onDismissNgonHighlight={onDismissNgonHighlight}
             onRestoreNgonHighlight={onRestoreNgonHighlight}
+            activeGeometryTask={activeGeometryTask}
+            onCancelGeometryTask={onCancelGeometryTask}
+            onAddMultiresLevel={onAddMultiresLevel}
+            onSetMultiresLevel={onSetMultiresLevel}
+            onSetMultiresViewportLevel={onSetMultiresViewportLevel}
+            onToggleMultiresAutoLod={onToggleMultiresAutoLod}
+            onSetMultiresMode={onSetMultiresMode}
+            onDeleteMultiresHigherLevels={onDeleteMultiresHigherLevels}
+            onApplyMultires={onApplyMultires}
           />
         </div>
       ) : (

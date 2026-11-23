@@ -66,6 +66,8 @@ export type MaterialNodeType =
   | 'material_output'
   | 'principled_bsdf'
   | 'image_texture'
+  | 'noise_texture'
+  | 'voronoi_texture'
   | 'texture_coordinate'
   | 'mapping'
   | 'normal_map'
@@ -185,6 +187,13 @@ export interface SculptSymmetryAxes {
   z: boolean;
 }
 
+export interface SculptDyntopoSettings {
+  enabled: boolean;
+  detailSize: number;
+  subdivide: boolean;
+  collapse: boolean;
+}
+
 export interface SculptSettings {
   brush: SculptBrushType;
   radius: number;
@@ -192,6 +201,23 @@ export interface SculptSettings {
   invert: boolean;
   symmetry: SculptSymmetryAxes;
   strokeSmoothing: number;
+  dyntopo?: SculptDyntopoSettings;
+}
+
+export type MultiresSubdivisionMode = 'catmull_clark' | 'simple';
+
+export interface SerializedMultiresData {
+  version: 1;
+  mode: MultiresSubdivisionMode;
+  baseMesh: SerializedEditableMesh;
+  maxLevel: number;
+  currentLevel: number;
+  viewportLevel: number;
+  autoViewportLod: boolean;
+  /**
+   * Tangent-space displacements `(dt, db, dn)` stored as flat triples per level `1..maxLevel`.
+   */
+  deltasByLevel: Record<number, number[]>;
 }
 
 export interface SceneObjectData {
@@ -204,6 +230,7 @@ export interface SceneObjectData {
   locked: boolean;
   transform: ObjectTransform;
   mesh: SerializedEditableMesh;
+  multires?: SerializedMultiresData;
   material: MaterialSlot;
   materialId?: string;
   shading?: ObjectShadingMode;
@@ -427,12 +454,20 @@ export interface ToolConfigurations {
 
 export type ConfigurableToolKey = keyof ToolConfigurations;
 
+export interface GeometryResourceLimits {
+  maxMemoryBudgetMB: number | 'auto';
+  maxFacesPerObject: number | 'auto';
+  autoViewportLod: boolean;
+  warnThresholdRatio: number;
+}
+
 export interface ModelerSettings {
   displayMode: ViewportDisplayMode;
   xrayTransparency: number;
   showFaceOrientation?: boolean;
   showGrid: boolean;
   showAxes: boolean;
+  cleanBlackViewport?: boolean;
   xrayEditMode: boolean;
   gizmoSize: number;
   snapEnabled: boolean;
@@ -449,5 +484,6 @@ export interface ModelerSettings {
   timelapseAutoRecord: boolean;
   timelapseRecordCamera: boolean;
   timelapseIncludeCameraInPlayback: boolean;
+  geometryLimits?: GeometryResourceLimits;
 }
 

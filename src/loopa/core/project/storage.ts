@@ -20,6 +20,10 @@ import {
   normalizeProportionalSettings,
 } from '../mesh/proportionalEditing';
 import {
+  DEFAULT_GEOMETRY_RESOURCE_LIMITS,
+  normalizeGeometryResourceLimits,
+} from '../mesh/resourceManager';
+import {
   DeleteFolderResolution,
   ExtrudeDefaultAxis,
   GizmoTransformMode,
@@ -549,6 +553,7 @@ export const DEFAULT_MODELER_SETTINGS: ModelerSettings = {
   showFaceOrientation: false,
   showGrid: true,
   showAxes: true,
+  cleanBlackViewport: false,
   xrayEditMode: false,
   gizmoSize: 1.25,
   snapEnabled: false,
@@ -565,6 +570,7 @@ export const DEFAULT_MODELER_SETTINGS: ModelerSettings = {
   timelapseAutoRecord: true,
   timelapseRecordCamera: true,
   timelapseIncludeCameraInPlayback: true,
+  geometryLimits: { ...DEFAULT_GEOMETRY_RESOURCE_LIMITS },
 };
 
 export function normalizeTouchSettings(
@@ -672,6 +678,7 @@ export function loadSettingsLocally(): ModelerSettings {
         ...DEFAULT_MODELER_SETTINGS,
         touch: createDefaultTouchSettings(),
         toolConfigs: createDefaultToolConfigs(),
+        geometryLimits: { ...DEFAULT_GEOMETRY_RESOURCE_LIMITS },
       };
     }
     const parsed = JSON.parse(raw) as Partial<ModelerSettings>;
@@ -683,6 +690,7 @@ export function loadSettingsLocally(): ModelerSettings {
       ...DEFAULT_MODELER_SETTINGS,
       ...parsed,
       displayMode,
+      cleanBlackViewport: Boolean(parsed.cleanBlackViewport),
       xrayEditMode: displayMode === 'xray',
       xrayTransparency: normalizeXrayTransparency(parsed.xrayTransparency),
       showFaceOrientation: Boolean(parsed.showFaceOrientation),
@@ -712,6 +720,7 @@ export function loadSettingsLocally(): ModelerSettings {
         typeof parsed.timelapseIncludeCameraInPlayback === 'boolean'
           ? parsed.timelapseIncludeCameraInPlayback
           : DEFAULT_MODELER_SETTINGS.timelapseIncludeCameraInPlayback,
+      geometryLimits: normalizeGeometryResourceLimits(parsed.geometryLimits),
     };
   } catch {
     return {
@@ -719,6 +728,7 @@ export function loadSettingsLocally(): ModelerSettings {
       proportionalEditing: { ...DEFAULT_PROPORTIONAL_EDITING_SETTINGS },
       touch: createDefaultTouchSettings(),
       toolConfigs: createDefaultToolConfigs(),
+      geometryLimits: { ...DEFAULT_GEOMETRY_RESOURCE_LIMITS },
     };
   }
 }

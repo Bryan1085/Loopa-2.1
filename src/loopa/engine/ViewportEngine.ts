@@ -55,6 +55,7 @@ import {
   ObjectTransformChange,
   SceneObjectData,
   SculptSettings,
+  SerializedMultiresData,
   TouchModifierState,
   TransformTool,
   ViewportDisplayMode,
@@ -66,6 +67,13 @@ import {
   createSculptStrokeSession,
   stepSculptStroke,
 } from '../core/mesh/sculptBrushes';
+import { evaluateMultiresLevel } from '../core/mesh/multiresolution';
+import {
+  DEFAULT_GEOMETRY_RESOURCE_LIMITS,
+  computeAdaptiveBudgets,
+  probeRuntimeDeviceCapabilities,
+  registerGeometryCachePurgeHook,
+} from '../core/mesh/resourceManager';
 import { DEFAULT_TOUCH_SETTINGS } from '../core/project/storage';
 import { TimelapseCameraState } from '../core/timelapse/types';
 import {
@@ -207,6 +215,8 @@ interface ObjectVisual {
   materialId: string | null;
   modifiers: ModifierSlot[];
   modifiersSignature: string;
+  multiresSignature?: string;
+  isLodProxyActive?: boolean;
   hasActiveModifiers: boolean;
   hasFaces: boolean;
   locked: boolean;
@@ -345,7 +355,13 @@ export class ViewportEngine {
     string,
     Partial<
       Record<
-        'map' | 'normalMap' | 'bumpMap',
+        | 'map'
+        | 'normalMap'
+        | 'bumpMap'
+        | 'roughnessMap'
+        | 'metalnessMap'
+        | 'aoMap'
+        | 'displacementMap',
         { dataUrl: string; texture: THREE.Texture }
       >
     >
@@ -472,6 +488,9 @@ export class ViewportEngine {
   private wheelCameraCommitTimer: number | null = null;
   private disposed = false;
   private paused = false;
+  private isCleanBlackViewport = false;
+  private multiresLodCache = new WeakMap<SerializedMultiresData, Map<number, EditableMesh>>();
+  private unregisterCachePurgeHook: (() => void) | null = null;
 
   private resizeObserver: ResizeObserver;
   private raycaster = new THREE.Raycaster();
@@ -1030,6 +1049,7 @@ export class ViewportEngine {
       this.isOrbitDragging = true;
       this.cameraAnimTargetPos = null;
       this.cameraAnimTargetLook = null;
+      this.refreshViewportLodForOrbit();
     });
     this.orbitControls.addEventListener('change', () => {
       this.requestRender();
@@ -1055,9 +1075,14 @@ export class ViewportEngine {
     });
     this.orbitControls.addEventListener('end', () => {
       this.isOrbitDragging = false;
+      this.refreshViewportLodForOrbit();
       if (this.paused || this.disposed) return;
       this.lastCameraSampleAt = performance.now();
       this.emitCameraMovement('orbit');
+    });
+
+    this.unregisterCachePurgeHook = registerGeometryCachePurgeHook(() => {
+      this.multiresLodCache = new WeakMap();
     });
 
     dom.addEventListener('webglcontextlost', this.onContextLost);
@@ -1458,6 +1483,14 @@ export class ViewportEngine {
       return;
     }
 
+    if (this.selectedObjectId) {
+      const selectedVisual = this.visuals.get(this.selectedObjectId);
+      if (selectedVisual?.isLodProxyActive) {
+        selectedVisual.isLodProxyActive = false;
+        this.applyLiveSculptMeshToVisual(selectedVisual, selectedVisual.baseEditableMesh);
+      }
+    }
+
     const hit = this.raycastActiveSculptMesh(e.clientX, e.clientY);
     if (!hit) {
       // Missed active mesh: allow OrbitControls 1-finger/mouse camera rotation
@@ -1482,6 +1515,11 @@ export class ViewportEngine {
     this.activeCamera.getWorldDirection(camDir).normalize();
     this.sculptGrabPlane.setFromNormalAndCoplanarPoint(camDir.clone().negate(), hit.worldPoint);
 
+    const adaptiveMaxFaces = computeAdaptiveBudgets(
+      probeRuntimeDeviceCapabilities(),
+      this.settings?.geometryLimits ?? DEFAULT_GEOMETRY_RESOURCE_LIMITS,
+    ).hardMaxFaces;
+
     const session = createSculptStrokeSession({
       objectId: hit.visual.id,
       mesh: hit.visual.baseEditableMesh,
@@ -1489,6 +1527,7 @@ export class ViewportEngine {
       settings: this.sculptSettings,
       worldHit: hit.worldPoint,
       worldNormal: hit.worldNormal,
+      maxFaces: adaptiveMaxFaces,
     });
     this.sculptStrokeSession = session;
     this.sculptPointerId = e.pointerId;
@@ -3933,9 +3972,20 @@ export class ViewportEngine {
       this.mergeCursorMarker.visible = false;
     }
 
-    // Grid & Axes visibility
-    this.gridHelper.visible = params.settings.showGrid;
-    this.axesGroup.visible = params.settings.showAxes;
+    // Clean black inspection background + Grid & Axes visibility
+    const cleanBlack = Boolean(params.settings.cleanBlackViewport);
+    if (cleanBlack !== this.isCleanBlackViewport) {
+      this.isCleanBlackViewport = cleanBlack;
+      if (cleanBlack) {
+        this.scene.background = new THREE.Color(0x000000);
+        this.scene.fog = null;
+      } else {
+        this.scene.background = new THREE.Color(0x1d1f24);
+        this.scene.fog = new THREE.FogExp2(0x1d1f24, 0.011);
+      }
+    }
+    this.gridHelper.visible = cleanBlack ? false : params.settings.showGrid;
+    this.axesGroup.visible = cleanBlack ? false : params.settings.showAxes;
 
     // Projection switching
     if (this.projection !== params.projection) {
@@ -3985,19 +4035,32 @@ export class ViewportEngine {
         )) {
           const modSig = this.buildModifiersSignature(objData, this.sceneTransformRefs);
           const nextShading: ObjectShadingMode = objData.shading === 'smooth' ? 'smooth' : 'flat';
+          const effectiveViewportLevel = this.resolveViewportMultiresLevel(objData);
+          const multiresSig = objData.multires
+            ? `${objData.multires.currentLevel}:${effectiveViewportLevel}:${objData.multires.mode}`
+            : 'none';
           if (
             visual.lastMeshData !== objData.mesh ||
             visual.group.userData.meshRevision !== params.meshRevision ||
             visual.modifiersSignature !== modSig ||
+            visual.multiresSignature !== multiresSig ||
             visual.shading !== nextShading ||
             visual.materialId !== nextPrimaryMatId
           ) {
             visual.modifiers = objData.modifiers ?? [];
             visual.modifiersSignature = modSig;
+            visual.multiresSignature = multiresSig;
             visual.shading = nextShading;
             visual.materialId = nextPrimaryMatId;
             visual.baseEditableMesh = EditableMesh.fromJSON(objData.mesh);
             visual.lastMeshData = objData.mesh;
+
+            const viewportSourceMesh = this.getViewportDisplayEditableMesh(
+              objData,
+              visual.baseEditableMesh,
+              effectiveViewportLevel,
+            );
+            visual.isLodProxyActive = viewportSourceMesh !== visual.baseEditableMesh;
 
             if (hasActiveViewportModifiers(visual.modifiers)) {
               const ownerRef: ModifierTransformRef = {
@@ -4006,17 +4069,17 @@ export class ViewportEngine {
                 rotation: objData.transform.rotation,
                 scale: objData.transform.scale,
               };
-              const evalRes = evaluateObjectModifiers(objData.mesh, visual.modifiers, {
+              const evalRes = evaluateObjectModifiers(viewportSourceMesh.toJSON(), visual.modifiers, {
                 ownerTransform: ownerRef,
                 sceneTransformRefs: this.sceneTransformRefs,
               });
               visual.hasActiveModifiers = evalRes.hasActiveModifiers;
               visual.editableMesh = evalRes.hasActiveModifiers
                 ? EditableMesh.fromJSON(evalRes.mesh)
-                : visual.baseEditableMesh;
+                : viewportSourceMesh;
             } else {
               visual.hasActiveModifiers = false;
-              visual.editableMesh = visual.baseEditableMesh;
+              visual.editableMesh = viewportSourceMesh;
             }
 
             this.rebuildObjectGeometry(visual);
@@ -4175,11 +4238,13 @@ export class ViewportEngine {
       const textureDataUrl = surface.baseColorTextureUrl;
       const opacity = Math.max(0.02, Math.min(1, surface.opacity ?? 1));
       const isTransparent = opacity < 0.999;
+      const effectiveMetalness = surface.metallicTextureUrl ? 1 : surface.metallic;
+      const effectiveRoughness = surface.roughnessTextureUrl ? 1 : surface.roughness;
       if (!threeMat) {
         threeMat = new THREE.MeshPhysicalMaterial({
           color: textureDataUrl ? '#ffffff' : surface.baseColor,
-          metalness: surface.metallic,
-          roughness: surface.roughness,
+          metalness: effectiveMetalness,
+          roughness: effectiveRoughness,
           ior: surface.ior,
           specularIntensity: surface.specular,
           opacity,
@@ -4197,8 +4262,8 @@ export class ViewportEngine {
         this.sharedMaterials.set(mat.id, threeMat);
       } else {
         threeMat.color.set(textureDataUrl ? '#ffffff' : surface.baseColor);
-        threeMat.metalness = surface.metallic;
-        threeMat.roughness = surface.roughness;
+        threeMat.metalness = effectiveMetalness;
+        threeMat.roughness = effectiveRoughness;
         threeMat.ior = surface.ior;
         threeMat.specularIntensity = surface.specular;
         if (threeMat.transparent !== isTransparent) {
@@ -4239,13 +4304,150 @@ export class ViewportEngine {
         surface.bumpTextureTransform,
       );
       threeMat.bumpScale = surface.bumpScale ?? 1;
+      this.syncSharedMaterialTexture(
+        mat,
+        threeMat,
+        'roughnessMap',
+        surface.roughnessTextureUrl,
+        undefined,
+      );
+      this.syncSharedMaterialTexture(
+        mat,
+        threeMat,
+        'metalnessMap',
+        surface.metallicTextureUrl,
+        undefined,
+      );
+      const extSurface = surface as EvaluatedMaterialSurface & {
+        aoTextureUrl?: string;
+        aoStrength?: number;
+        displacementTextureUrl?: string;
+        displacementScale?: number;
+      };
+      this.syncSharedMaterialTexture(
+        mat,
+        threeMat,
+        'aoMap',
+        extSurface.aoTextureUrl,
+        undefined,
+      );
+      threeMat.aoMapIntensity = extSurface.aoTextureUrl
+        ? Math.max(0, Math.min(2, extSurface.aoStrength ?? 1))
+        : 1;
+      this.syncSharedMaterialTexture(
+        mat,
+        threeMat,
+        'displacementMap',
+        extSurface.displacementTextureUrl,
+        undefined,
+      );
+      threeMat.displacementScale = extSurface.displacementTextureUrl
+        ? (extSurface.displacementScale ?? 0.04)
+        : 0;
+    }
+  }
+
+  private resolveViewportMultiresLevel(objData: SceneObjectData): number {
+    const multires = objData.multires;
+    if (!multires || multires.maxLevel <= 0) return 0;
+    if (this.workMode === 'edit' || this.sculptStrokeSession?.objectId === objData.id) {
+      return multires.currentLevel;
+    }
+    const autoLodEnabled =
+      multires.autoViewportLod &&
+      (this.settings?.geometryLimits?.autoViewportLod ?? true);
+    if (
+      this.isOrbitDragging &&
+      autoLodEnabled &&
+      objData.mesh.faces.length > 12000 &&
+      multires.currentLevel > 0
+    ) {
+      return Math.max(0, Math.min(multires.viewportLevel, multires.currentLevel - 1));
+    }
+    return Math.max(0, Math.min(multires.currentLevel, multires.viewportLevel));
+  }
+
+  private getViewportDisplayEditableMesh(
+    objData: SceneObjectData,
+    fullResBase: EditableMesh,
+    targetLevel: number,
+  ): EditableMesh {
+    const multires = objData.multires;
+    if (!multires || targetLevel >= multires.currentLevel) {
+      return fullResBase;
+    }
+    let levelCache = this.multiresLodCache.get(multires);
+    if (!levelCache) {
+      levelCache = new Map<number, EditableMesh>();
+      this.multiresLodCache.set(multires, levelCache);
+    }
+    let proxy = levelCache.get(targetLevel);
+    if (!proxy) {
+      proxy = evaluateMultiresLevel(multires, targetLevel, objData.shading);
+      levelCache.set(targetLevel, proxy);
+    }
+    return proxy;
+  }
+
+  private refreshViewportLodForOrbit(): void {
+    if (this.workMode === 'edit') return;
+    let changed = false;
+    for (const [id, visual] of this.visuals.entries()) {
+      const objData = this.currentObjectsData.get(id);
+      if (!objData || objData.objectType !== 'mesh' || !objData.multires) continue;
+      if (this.sculptStrokeSession?.objectId === id) continue;
+      const autoLodEnabled =
+        objData.multires.autoViewportLod &&
+        (this.settings?.geometryLimits?.autoViewportLod ?? true);
+      if (!autoLodEnabled || objData.mesh.faces.length <= 12000) continue;
+
+      const targetLevel = this.resolveViewportMultiresLevel(objData);
+      const nextSig = `${objData.multires.currentLevel}:${targetLevel}:${objData.multires.mode}`;
+      if (visual.multiresSignature === nextSig) continue;
+
+      visual.multiresSignature = nextSig;
+      const viewportSourceMesh = this.getViewportDisplayEditableMesh(
+        objData,
+        visual.baseEditableMesh,
+        targetLevel,
+      );
+      visual.isLodProxyActive = viewportSourceMesh !== visual.baseEditableMesh;
+
+      if (hasActiveViewportModifiers(visual.modifiers)) {
+        const evalRes = evaluateObjectModifiers(viewportSourceMesh.toJSON(), visual.modifiers, {
+          ownerTransform: {
+            id: objData.id,
+            position: objData.transform.position,
+            rotation: objData.transform.rotation,
+            scale: objData.transform.scale,
+          },
+          sceneTransformRefs: this.sceneTransformRefs,
+        });
+        visual.editableMesh = evalRes.hasActiveModifiers
+          ? EditableMesh.fromJSON(evalRes.mesh)
+          : viewportSourceMesh;
+      } else {
+        visual.editableMesh = viewportSourceMesh;
+      }
+      this.rebuildObjectGeometry(visual);
+      changed = true;
+    }
+    if (changed) {
+      this.requestRender();
     }
   }
 
   private syncSharedMaterialTexture(
     materialAsset: MaterialAsset,
     material: THREE.MeshStandardMaterial,
-    channel: 'map' | 'normalMap' | 'bumpMap',
+    channel:
+      | 'map'
+      | 'normalMap'
+      | 'bumpMap'
+      | 'roughnessMap'
+      | 'metalnessMap'
+      | 'aoMap'
+      | 'displacementMap',
     dataUrl: string | undefined,
     transform?: EvaluatedMaterialSurface['textureTransform'],
   ): void {
@@ -5051,6 +5253,7 @@ export class ViewportEngine {
     solidGeo.setAttribute('normal', new THREE.BufferAttribute(triData.normals, 3));
     if (triData.uvs) {
       solidGeo.setAttribute('uv', new THREE.BufferAttribute(triData.uvs, 2));
+      solidGeo.setAttribute('uv2', new THREE.BufferAttribute(triData.uvs, 2));
     }
     solidGeo.clearGroups();
     for (const grp of triData.materialGroups) {
@@ -6108,6 +6311,10 @@ export class ViewportEngine {
     }
     this.sharedMaterialTextures.clear();
     this.materialAssetMap.clear();
+
+    this.unregisterCachePurgeHook?.();
+    this.unregisterCachePurgeHook = null;
+    this.multiresLodCache = new WeakMap();
 
     this.renderer.dispose();
     if (dom.parentElement === this.container) {

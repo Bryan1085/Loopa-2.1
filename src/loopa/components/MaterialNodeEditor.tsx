@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, Plus, Search, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Eye, EyeOff, Plus, Trash2, X } from "lucide-react";
 import {
   areMaterialSocketTypesCompatible,
   connectMaterialNodeSockets,
@@ -7,7 +7,6 @@ import {
   MaterialNodeDefinition,
   evaluateMaterialNodeGraph,
   getNodeCategoryColor,
-  MaterialNodeCategory,
   MaterialSocketType,
 } from "../core/materials/nodeGraph";
 import { doesSegmentIntersectLink, Point2D } from "../core/materials/nodeLinkCut";
@@ -19,6 +18,8 @@ import {
   MaterialNodeValue,
   TouchModifierState,
 } from "../core/project/types";
+import { useMaterialWorkspaceSplit } from "./MaterialWorkspaceSplit";
+import { NumericFieldInput } from "./NumericFieldInput";
 
 interface MaterialNodeEditorProps {
   material: MaterialAsset;
@@ -36,6 +37,8 @@ const editableNodeTypes: MaterialNodeType[] = [
   "principled_bsdf",
   "material_output",
   "image_texture",
+  "noise_texture",
+  "voronoi_texture",
   "texture_coordinate",
   "mapping",
   "normal_map",
@@ -83,57 +86,84 @@ function createNode(
           }
         : type === "image_texture"
           ? { dataUrl: "", textureName: "" }
-          : type === "mapping"
+          : type === "noise_texture"
             ? {
-                location: [0, 0, 0],
-                rotation: [0, 0, 0],
-                scale: [1, 1, 1],
+                dimensions: "3D",
+                w: 0,
+                scale: 5,
+                detail: 2,
+                roughness: 0.5,
+                lacunarity: 2,
+                offset: 0,
+                distortion: 0,
+                normalize: true,
               }
-            : type === "normal_map"
-              ? { strength: 1 }
-              : type === "bump"
-                ? { strength: 1, distance: 1 }
-                : type === "math"
-                  ? { operation: "add", a: 0, b: 0 }
-                  : type === "mix_color"
-                    ? {
-                        factor: 0.5,
-                        colorA: "#000000",
-                        colorB: "#ffffff",
-                      }
-                    : type === "mix_float" || type === "mix_vector"
-                      ? type === "mix_vector"
+            : type === "voronoi_texture"
+              ? {
+                  dimensions: "3D",
+                  feature: "f1",
+                  distanceMetric: "euclidean",
+                  w: 0,
+                  scale: 5,
+                  detail: 0,
+                  roughness: 0.5,
+                  lacunarity: 2,
+                  smoothness: 1,
+                  exponent: 0.5,
+                  randomness: 1,
+                  normalize: false,
+                }
+              : type === "mapping"
+                ? {
+                    location: [0, 0, 0],
+                    rotation: [0, 0, 0],
+                    scale: [1, 1, 1],
+                  }
+                : type === "normal_map"
+                  ? { strength: 1 }
+                  : type === "bump"
+                    ? { strength: 1, distance: 1 }
+                    : type === "math"
+                      ? { operation: "add", a: 0, b: 0 }
+                      : type === "mix_color"
                         ? {
-                            operation: "mix",
                             factor: 0.5,
-                            a: [0, 0, 0],
-                            b: [1, 1, 1],
+                            colorA: "#000000",
+                            colorB: "#ffffff",
                           }
-                        : { operation: "mix", factor: 0.5, a: 0, b: 1 }
-                      : type === "transform"
-                        ? {
-                            location: [0, 0, 0],
-                            rotation: [0, 0, 0],
-                            scale: [1, 1, 1],
-                          }
-                        : type === "value_float"
-                          ? { value: 0.5 }
-                          : type === "value_integer"
-                            ? { value: 0 }
-                            : type === "value_boolean"
-                              ? { value: false }
-                              : type === "value_color"
-                                ? { value: "#ffffff" }
-                                : type === "value_vector"
-                                  ? { value: [0, 0, 0] }
-                                  : {
-                                      factor: 0.5,
-                                      interpolation: "linear",
-                                      stops: [
-                                        { position: 0, color: "#000000", alpha: 1 },
-                                        { position: 1, color: "#ffffff", alpha: 1 },
-                                      ],
-                                    };
+                        : type === "mix_float" || type === "mix_vector"
+                          ? type === "mix_vector"
+                            ? {
+                                operation: "mix",
+                                factor: 0.5,
+                                a: [0, 0, 0],
+                                b: [1, 1, 1],
+                              }
+                            : { operation: "mix", factor: 0.5, a: 0, b: 1 }
+                          : type === "transform"
+                            ? {
+                                location: [0, 0, 0],
+                                rotation: [0, 0, 0],
+                                scale: [1, 1, 1],
+                              }
+                            : type === "value_float"
+                              ? { value: 0.5 }
+                              : type === "value_integer"
+                                ? { value: 0 }
+                                : type === "value_boolean"
+                                  ? { value: false }
+                                  : type === "value_color"
+                                    ? { value: "#ffffff" }
+                                    : type === "value_vector"
+                                      ? { value: [0, 0, 0] }
+                                      : {
+                                          factor: 0.5,
+                                          interpolation: "linear",
+                                          stops: [
+                                            { position: 0, color: "#000000", alpha: 1 },
+                                            { position: 1, color: "#ffffff", alpha: 1 },
+                                          ],
+                                        };
   return {
     id: createNodeId(graph, type),
     type,
@@ -154,6 +184,10 @@ function getNodeDescription(type: MaterialNodeType): string {
       return "Salida final de superficie para el material 3D.";
     case "image_texture":
       return "Carga y mapea imágenes PNG o JPEG como texturas.";
+    case "noise_texture":
+      return "Genera ruido fractal procedural (1D–4D) en tiempo real.";
+    case "voronoi_texture":
+      return "Genera patrones celulares Voronoi (F1, F2, Smooth F1, borde).";
     case "texture_coordinate":
       return "Proporciona coordenadas UV y generadas.";
     case "mapping":
@@ -218,6 +252,83 @@ function cloneNodeValue(value: MaterialNodeValue): MaterialNodeValue {
     );
   }
   return value;
+}
+
+function NodeNumericBar({
+  label,
+  ariaLabel,
+  value,
+  min,
+  max,
+  step,
+  decimals = 2,
+  clampMax,
+  clampMin,
+  connected,
+  onBeginEdit,
+  onChange,
+}: {
+  label: string;
+  ariaLabel: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  decimals?: number;
+  clampMin?: number;
+  clampMax?: number;
+  connected?: boolean;
+  onBeginEdit: () => void;
+  onChange: (nextValue: number) => void;
+}) {
+  const sliderVal = Math.max(min, Math.min(max, Number.isFinite(value) ? value : min));
+  const normalizeValue = (candidate: number) => {
+    let next = candidate;
+    if (clampMin !== undefined) next = Math.max(clampMin, next);
+    if (clampMax !== undefined) next = Math.min(clampMax, next);
+    return next;
+  };
+  return (
+    <div
+      className={`space-y-1 rounded border border-[#282d38] bg-[#121419] px-1.5 py-1 ${
+        connected ? "opacity-60" : ""
+      }`}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-[10px] font-medium text-[#aeb4c0]">
+          {label}
+          {connected ? " (conectado)" : ""}
+        </span>
+        <NumericFieldInput
+          ariaLabel={ariaLabel}
+          value={value}
+          decimals={decimals}
+          disabled={connected}
+          onCommit={(nextValue) => {
+            onBeginEdit();
+            onChange(normalizeValue(nextValue));
+          }}
+          className="h-6 w-14 rounded border border-[#343a46] bg-[#181b22] px-1 text-right text-[10px] font-mono-tabular text-[#f3f4f6] outline-none focus:border-[#5ecd6e] disabled:cursor-not-allowed"
+        />
+      </div>
+      <input
+        type="range"
+        aria-label={`Deslizador ${ariaLabel}`}
+        min={min}
+        max={max}
+        step={step}
+        disabled={connected}
+        value={sliderVal}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          onBeginEdit();
+        }}
+        onChange={(event) => onChange(normalizeValue(Number(event.target.value)))}
+        className="h-2.5 w-full cursor-pointer accent-[#5ecd6e] disabled:cursor-not-allowed"
+      />
+    </div>
+  );
 }
 
 function ColorRampControls({
@@ -498,9 +609,34 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
   const [connectionDrag, setConnectionDrag] = useState<{
     fromNodeId: string;
     fromSocket: string;
+    direction: "output" | "input";
     pointerId: number;
     x: number;
     y: number;
+    clientX: number;
+    clientY: number;
+  } | null>(null);
+  const [autoPanSpeed, setAutoPanSpeed] = useState<number>(1);
+  const autoPanSpeedRef = useRef<number>(1);
+  autoPanSpeedRef.current = autoPanSpeed;
+  const connectionPointerClientRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const [selectionBox, setSelectionBox] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const lastEmptyTapRef = useRef<{ time: number; clientX: number; clientY: number } | null>(null);
+  const emptyTapCandidateRef = useRef<{ time: number; clientX: number; clientY: number } | null>(
+    null,
+  );
+  const boxSelectionRef = useRef<{
+    pointerId: number;
+    startCanvas: Point2D;
+    startClientX: number;
+    startClientY: number;
+    additive: boolean;
+    baseSelectedIds: Set<string>;
   } | null>(null);
   const [cutTrail, setCutTrail] = useState<Point2D[] | null>(null);
   const [cutFlashes, setCutFlashes] = useState<
@@ -570,6 +706,13 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
   const isCanvas = variant === "canvas";
   const effectiveShift = physicalModifiers.shift || Boolean(screenModifiers?.shift);
   const effectiveCtrl = physicalModifiers.ctrl || Boolean(screenModifiers?.ctrl);
+  const splitContext = useMaterialWorkspaceSplit();
+  const registerInlineToggle = splitContext?.registerInlineToggle;
+
+  useEffect(() => {
+    if (!isCanvas || !registerInlineToggle) return;
+    return registerInlineToggle();
+  }, [isCanvas, registerInlineToggle]);
 
   useEffect(() => {
     if (!isCanvas) return;
@@ -579,6 +722,17 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
         ctrl: event.ctrlKey || event.metaKey,
         alt: event.altKey,
       });
+      if (event.key === "Escape") {
+        if (connectionDragRef.current) {
+          connectionDragRef.current = null;
+          connectionPointerClientRef.current = null;
+          setConnectionDrag(null);
+        }
+        if (boxSelectionRef.current) {
+          boxSelectionRef.current = null;
+          setSelectionBox(null);
+        }
+      }
     };
     const clearModifiers = () => {
       setPhysicalModifiers({ shift: false, ctrl: false, alt: false });
@@ -686,6 +840,75 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     };
   }, []);
 
+  const isConnectionDragging = Boolean(connectionDrag);
+  useEffect(() => {
+    if (!isCanvas || !isConnectionDragging) return;
+    let rafId = 0;
+    let lastTime = performance.now();
+    const EDGE_MARGIN = 52;
+    const BASE_MAX_SPEED = 14;
+
+    const tick = (now: number) => {
+      const activeConn = connectionDragRef.current;
+      const clientPt = connectionPointerClientRef.current;
+      const viewport = canvasViewportRef.current;
+      if (!activeConn || !clientPt || !viewport) return;
+
+      const bounds = viewport.getBoundingClientRect();
+      if (bounds.width > 0 && bounds.height > 0) {
+        const dtScale = Math.min(3, Math.max(0.25, (now - lastTime) / 16.67));
+        lastTime = now;
+
+        const distLeft = clientPt.clientX - bounds.left;
+        const distRight = bounds.right - clientPt.clientX;
+        const distTop = clientPt.clientY - bounds.top;
+        const distBottom = bounds.bottom - clientPt.clientY;
+
+        let vx = 0;
+        let vy = 0;
+        const speed = BASE_MAX_SPEED * autoPanSpeedRef.current * dtScale;
+
+        if (distLeft < EDGE_MARGIN) {
+          const factor = Math.min(1.5, Math.max(0.1, (EDGE_MARGIN - distLeft) / EDGE_MARGIN));
+          vx = speed * factor;
+        } else if (distRight < EDGE_MARGIN) {
+          const factor = Math.min(1.5, Math.max(0.1, (EDGE_MARGIN - distRight) / EDGE_MARGIN));
+          vx = -speed * factor;
+        }
+
+        if (distTop < EDGE_MARGIN) {
+          const factor = Math.min(1.5, Math.max(0.1, (EDGE_MARGIN - distTop) / EDGE_MARGIN));
+          vy = speed * factor;
+        } else if (distBottom < EDGE_MARGIN) {
+          const factor = Math.min(1.5, Math.max(0.1, (EDGE_MARGIN - distBottom) / EDGE_MARGIN));
+          vy = -speed * factor;
+        }
+
+        if (Math.abs(vx) > 0.01 || Math.abs(vy) > 0.01) {
+          const nextPan = {
+            x: panRef.current.x + vx,
+            y: panRef.current.y + vy,
+          };
+          panRef.current = nextPan;
+          setPan(nextPan);
+          const canvasPt = {
+            x: (clientPt.clientX - bounds.left - nextPan.x) / zoomRef.current,
+            y: (clientPt.clientY - bounds.top - nextPan.y) / zoomRef.current,
+          };
+          const updated = { ...activeConn, ...canvasPt };
+          connectionDragRef.current = updated;
+          setConnectionDrag(updated);
+        }
+      }
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [isCanvas, isConnectionDragging]);
+
   const updateNode = (nodeId: string, values: Record<string, MaterialNodeValue>) => {
     onChange({
       ...graph,
@@ -760,17 +983,84 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     });
   };
 
-  const duplicateNode = (node: MaterialNode) => {
+  const toggleNodeCollapsed = (nodeId: string) => {
+    const currNode = graph.nodes.find((n) => n.id === nodeId);
+    if (!currNode) return;
     onBeginEdit();
-    const duplicate: MaterialNode = {
-      ...node,
-      id: createNodeId(graph, node.type),
-      position: { x: node.position.x + 36, y: node.position.y + 36 },
-      values: Object.fromEntries(
-        Object.entries(node.values).map(([key, value]) => [key, cloneNodeValue(value)]),
+    onChange({
+      ...graph,
+      nodes: graph.nodes.map((node) =>
+        node.id === nodeId ? { ...node, collapsed: !Boolean(node.collapsed) } : node,
       ),
+    });
+  };
+
+  const duplicateSelection = (anchorNode?: MaterialNode) => {
+    const useMulti =
+      selectedNodeIds.size > 1 && (!anchorNode || selectedNodeIds.has(anchorNode.id));
+    const sourceNodes = useMulti
+      ? graph.nodes.filter((node) => selectedNodeIds.has(node.id))
+      : anchorNode
+        ? [anchorNode]
+        : [];
+    if (sourceNodes.length === 0) return;
+
+    onBeginEdit();
+    const idMap = new Map<string, string>();
+    const workingGraph: MaterialNodeGraph = {
+      ...graph,
+      nodes: [...graph.nodes],
+      links: [...graph.links],
     };
-    onChange({ ...graph, nodes: [...graph.nodes, duplicate] });
+    const newNodes: MaterialNode[] = [];
+
+    for (const source of sourceNodes) {
+      const nextId = createNodeId(workingGraph, source.type);
+      idMap.set(source.id, nextId);
+      const duplicate: MaterialNode = {
+        ...source,
+        id: nextId,
+        position: { x: source.position.x + 36, y: source.position.y + 36 },
+        values: Object.fromEntries(
+          Object.entries(source.values).map(([key, value]) => [key, cloneNodeValue(value)]),
+        ),
+      };
+      workingGraph.nodes.push(duplicate);
+      newNodes.push(duplicate);
+    }
+
+    for (const link of graph.links) {
+      const newFrom = idMap.get(link.fromNodeId);
+      const newTo = idMap.get(link.toNodeId);
+      if (newFrom && newTo) {
+        workingGraph.links.push({
+          id: `${newFrom}:${link.fromSocket}->${newTo}:${link.toSocket}`,
+          fromNodeId: newFrom,
+          fromSocket: link.fromSocket,
+          toNodeId: newTo,
+          toSocket: link.toSocket,
+        });
+      }
+    }
+
+    onChange(workingGraph);
+    if (useMulti) {
+      setSelectedNodeIds(new Set(newNodes.map((node) => node.id)));
+    }
+  };
+
+  const removeSelectedNodes = () => {
+    if (selectedNodeIds.size === 0) return;
+    onBeginEdit();
+    const removedIds = selectedNodeIds;
+    onChange({
+      ...graph,
+      nodes: graph.nodes.filter((node) => !removedIds.has(node.id)),
+      links: graph.links.filter(
+        (link) => !removedIds.has(link.fromNodeId) && !removedIds.has(link.toNodeId),
+      ),
+    });
+    setSelectedNodeIds(new Set());
   };
 
   const startNodeDrag = (event: React.PointerEvent<HTMLElement>, node: MaterialNode) => {
@@ -823,6 +1113,10 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
   const moveNodeDrag = (event: React.PointerEvent<HTMLElement>) => {
     const drag = dragStateRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    const distPx = Math.hypot(event.clientX - drag.pointerX, event.clientY - drag.pointerY);
+    if (!drag.moved && distPx < 6) {
+      return;
+    }
     drag.moved = true;
     const deltaX = (event.clientX - drag.pointerX) / zoom;
     const deltaY = (event.clientY - drag.pointerY) / zoom;
@@ -860,15 +1154,12 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
       if (hp && hp.pointerId === event.pointerId) {
         const movedPx = Math.hypot(event.clientX - hp.startX, event.clientY - hp.startY);
         const duration = Date.now() - hp.startTime;
-        if (movedPx < 6 && duration < 350) {
-          onBeginEdit();
-          const currNode = graph.nodes.find((n) => n.id === hp.nodeId);
-          const isCollapsed = Boolean(currNode?.collapsed);
-          updateNode(hp.nodeId, { collapsed: !isCollapsed });
+        if (movedPx < 6 && duration < 500) {
+          toggleNodeCollapsed(hp.nodeId);
         }
-        headerPressRef.current = null;
       }
     }
+    headerPressRef.current = null;
     dragStateRef.current = null;
     setDragPositions(null);
     event.currentTarget.releasePointerCapture?.(event.pointerId);
@@ -878,14 +1169,19 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     event: React.PointerEvent<HTMLButtonElement>,
     node: MaterialNode,
     socketId: string,
+    direction: "output" | "input",
   ) => {
     event.preventDefault();
     event.stopPropagation();
     const point = clientToCanvas(event.clientX, event.clientY);
+    connectionPointerClientRef.current = { clientX: event.clientX, clientY: event.clientY };
     const next = {
       fromNodeId: node.id,
       fromSocket: socketId,
+      direction,
       pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
       ...point,
     };
     connectionDragRef.current = next;
@@ -976,6 +1272,31 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     onChange(nextGraph);
   };
 
+  const getNodeCanvasBounds = (node: MaterialNode) => {
+    const viewport = canvasViewportRef.current;
+    const plane = nodePlaneRef.current;
+    if (viewport && plane) {
+      const cardEl = plane.querySelector<HTMLElement>(`[data-node-id="${node.id}"]`);
+      const rect = cardEl?.getBoundingClientRect();
+      const viewportRect = viewport.getBoundingClientRect();
+      if (rect && rect.width > 0 && rect.height > 0) {
+        return {
+          x: (rect.left - viewportRect.left - panRef.current.x) / zoomRef.current,
+          y: (rect.top - viewportRect.top - panRef.current.y) / zoomRef.current,
+          width: rect.width / zoomRef.current,
+          height: rect.height / zoomRef.current,
+        };
+      }
+    }
+    const pos = getNodePosition(node);
+    return {
+      x: pos.x,
+      y: pos.y,
+      width: 280,
+      height: node.collapsed ? 100 : 260,
+    };
+  };
+
   const startCanvasPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!isCanvas) return;
     const target = event.target as HTMLElement;
@@ -1001,6 +1322,11 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
 
     if (activePointersRef.current.size >= 2) {
       navigationRef.current = null;
+      emptyTapCandidateRef.current = null;
+      if (boxSelectionRef.current) {
+        boxSelectionRef.current = null;
+        setSelectionBox(null);
+      }
       if (cutStrokeRef.current) {
         cutStrokeRef.current = null;
         setCutTrail(null);
@@ -1050,8 +1376,49 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     if (isNodeCard && !spacePressed) return;
 
     event.preventDefault();
-    if (!spacePressed && !shiftActive && !effectiveCtrl && !event.ctrlKey && !event.metaKey) {
+    const additive = Boolean(effectiveCtrl || event.ctrlKey || event.metaKey);
+
+    // Detect double-tap on empty canvas -> start marquee box selection on 2nd press + drag
+    const prevTap = lastEmptyTapRef.current;
+    const now = Date.now();
+    if (
+      !spacePressed &&
+      event.button === 0 &&
+      prevTap &&
+      now - prevTap.time <= 380 &&
+      Math.hypot(event.clientX - prevTap.clientX, event.clientY - prevTap.clientY) <= 32
+    ) {
+      lastEmptyTapRef.current = null;
+      emptyTapCandidateRef.current = null;
+      const startCanvas = clientToCanvas(event.clientX, event.clientY);
+      const baseSelectedIds = additive ? new Set(selectedNodeIds) : new Set<string>();
+      if (!additive) {
+        setSelectedNodeIds(new Set());
+      }
+      boxSelectionRef.current = {
+        pointerId: event.pointerId,
+        startCanvas,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        additive,
+        baseSelectedIds,
+      };
+      setSelectionBox({ x: startCanvas.x, y: startCanvas.y, width: 0, height: 0 });
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      return;
+    }
+
+    if (!spacePressed && !shiftActive && !additive) {
       setSelectedNodeIds(new Set());
+    }
+    if (!spacePressed && event.button === 0) {
+      emptyTapCandidateRef.current = {
+        time: now,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      };
+    } else {
+      emptyTapCandidateRef.current = null;
     }
     navigationRef.current = {
       pointerId: event.pointerId,
@@ -1109,6 +1476,37 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
       return;
     }
 
+    const boxSel = boxSelectionRef.current;
+    if (boxSel?.pointerId === event.pointerId) {
+      const currentCanvas = clientToCanvas(event.clientX, event.clientY);
+      const rect = {
+        x: Math.min(boxSel.startCanvas.x, currentCanvas.x),
+        y: Math.min(boxSel.startCanvas.y, currentCanvas.y),
+        width: Math.abs(currentCanvas.x - boxSel.startCanvas.x),
+        height: Math.abs(currentCanvas.y - boxSel.startCanvas.y),
+      };
+      setSelectionBox(rect);
+      const movedPx = Math.hypot(
+        event.clientX - boxSel.startClientX,
+        event.clientY - boxSel.startClientY,
+      );
+      if (movedPx >= 4) {
+        const nextIds = new Set(boxSel.baseSelectedIds);
+        const right = rect.x + rect.width;
+        const bottom = rect.y + rect.height;
+        for (const node of latestGraphRef.current.nodes) {
+          const b = getNodeCanvasBounds(node);
+          const intersects =
+            b.x <= right && b.x + b.width >= rect.x && b.y <= bottom && b.y + b.height >= rect.y;
+          if (intersects) {
+            nextIds.add(node.id);
+          }
+        }
+        setSelectedNodeIds(nextIds);
+      }
+      return;
+    }
+
     const cut = cutStrokeRef.current;
     if (cut?.pointerId === event.pointerId) {
       if (cut.pendingFromNodeBody) {
@@ -1130,6 +1528,15 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
 
     const navigation = navigationRef.current;
     if (navigation?.pointerId === event.pointerId) {
+      if (
+        emptyTapCandidateRef.current &&
+        Math.hypot(
+          event.clientX - emptyTapCandidateRef.current.clientX,
+          event.clientY - emptyTapCandidateRef.current.clientY,
+        ) > 10
+      ) {
+        emptyTapCandidateRef.current = null;
+      }
       const nextPan = {
         x: navigation.panX + event.clientX - navigation.pointerX,
         y: navigation.panY + event.clientY - navigation.pointerY,
@@ -1139,13 +1546,29 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     }
     const connection = connectionDragRef.current;
     if (connection?.pointerId === event.pointerId) {
+      connectionPointerClientRef.current = { clientX: event.clientX, clientY: event.clientY };
       const point = clientToCanvas(event.clientX, event.clientY);
-      setConnectionDrag({ ...connection, ...point });
+      const updated = {
+        ...connection,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        ...point,
+      };
+      connectionDragRef.current = updated;
+      setConnectionDrag(updated);
     }
   };
 
   const finishCanvasPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     activePointersRef.current.delete(event.pointerId);
+
+    const boxSel = boxSelectionRef.current;
+    if (boxSel?.pointerId === event.pointerId) {
+      boxSelectionRef.current = null;
+      setSelectionBox(null);
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+      return;
+    }
 
     const cut = cutStrokeRef.current;
     if (cut?.pointerId === event.pointerId) {
@@ -1165,6 +1588,19 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
 
     if (navigationRef.current?.pointerId === event.pointerId) {
       navigationRef.current = null;
+      const tapCand = emptyTapCandidateRef.current;
+      emptyTapCandidateRef.current = null;
+      if (
+        tapCand &&
+        Date.now() - tapCand.time < 300 &&
+        Math.hypot(event.clientX - tapCand.clientX, event.clientY - tapCand.clientY) <= 10
+      ) {
+        lastEmptyTapRef.current = {
+          time: Date.now(),
+          clientX: event.clientX,
+          clientY: event.clientY,
+        };
+      }
       event.currentTarget.releasePointerCapture?.(event.pointerId);
     }
 
@@ -1183,43 +1619,51 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     const connection = connectionDragRef.current;
     if (connection?.pointerId !== event.pointerId) return;
     const element = document.elementFromPoint?.(event.clientX, event.clientY);
+    const targetSelector =
+      connection.direction === "output" ? "[data-node-input-socket]" : "[data-node-output-socket]";
     const pointerTarget =
-      element instanceof HTMLElement
-        ? element.closest<HTMLElement>("[data-node-input-socket]")
-        : null;
+      element instanceof HTMLElement ? element.closest<HTMLElement>(targetSelector) : null;
     const eventTarget =
-      event.target instanceof HTMLElement
-        ? event.target.closest<HTMLElement>("[data-node-input-socket]")
-        : null;
+      event.target instanceof HTMLElement ? event.target.closest<HTMLElement>(targetSelector) : null;
     const target = pointerTarget ?? eventTarget;
     if (target?.dataset.nodeId && target.dataset.socketId) {
-      connectToSocket(
-        connection.fromNodeId,
-        connection.fromSocket,
-        target.dataset.nodeId,
-        target.dataset.socketId,
-      );
+      if (connection.direction === "output") {
+        connectToSocket(
+          connection.fromNodeId,
+          connection.fromSocket,
+          target.dataset.nodeId,
+          target.dataset.socketId,
+        );
+      } else {
+        connectToSocket(
+          target.dataset.nodeId,
+          target.dataset.socketId,
+          connection.fromNodeId,
+          connection.fromSocket,
+        );
+      }
     } else {
       const fromNode = graph.nodes.find((n) => n.id === connection.fromNodeId);
       if (fromNode) {
         const fromDef = getNodeDefinition(fromNode.type);
-        const outSocket = fromDef.outputs.find((o) => o.id === connection.fromSocket);
-        const inSocket = fromDef.inputs.find((i) => i.id === connection.fromSocket);
-        const socketType = outSocket?.type ?? inSocket?.type;
-        const direction = outSocket ? "output" : "input";
-        if (socketType) {
+        const socketDef =
+          connection.direction === "output"
+            ? fromDef.outputs.find((o) => o.id === connection.fromSocket)
+            : fromDef.inputs.find((i) => i.id === connection.fromSocket);
+        if (socketDef) {
           const canvasPos = clientToCanvas(event.clientX, event.clientY);
           setSpawnPopup({
             fromNodeId: connection.fromNodeId,
             fromSocket: connection.fromSocket,
-            direction,
-            socketType,
+            direction: connection.direction,
+            socketType: socketDef.type,
             canvasPos,
           });
         }
       }
     }
     connectionDragRef.current = null;
+    connectionPointerClientRef.current = null;
     setConnectionDrag(null);
     event.currentTarget.releasePointerCapture?.(event.pointerId);
   };
@@ -1229,15 +1673,21 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     if (activePointersRef.current.size === 0) {
       multiTouchRef.current = null;
     }
+    if (boxSelectionRef.current?.pointerId === event.pointerId) {
+      boxSelectionRef.current = null;
+      setSelectionBox(null);
+    }
     if (cutStrokeRef.current?.pointerId === event.pointerId) {
       cutStrokeRef.current = null;
       setCutTrail(null);
     }
     if (navigationRef.current?.pointerId === event.pointerId) {
       navigationRef.current = null;
+      emptyTapCandidateRef.current = null;
     }
     if (connectionDragRef.current?.pointerId === event.pointerId) {
       connectionDragRef.current = null;
+      connectionPointerClientRef.current = null;
       setConnectionDrag(null);
     }
   };
@@ -1307,22 +1757,33 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
       event.preventDefault();
       setSpacePressed(true);
     }
+    if (event.key === "Escape" && connectionDragRef.current) {
+      event.preventDefault();
+      connectionDragRef.current = null;
+      connectionPointerClientRef.current = null;
+      setConnectionDrag(null);
+      return;
+    }
+    const isInputFocused =
+      event.target instanceof HTMLElement &&
+      event.target.closest("input, select, textarea");
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      event.key.toLowerCase() === "d" &&
+      selectedNodeIds.size > 0 &&
+      !isInputFocused
+    ) {
+      event.preventDefault();
+      duplicateSelection();
+      return;
+    }
     if (
       (event.key === "Delete" || event.key === "Backspace") &&
       selectedNodeIds.size > 0 &&
-      !(event.target instanceof HTMLElement && event.target.closest("input, select, textarea"))
+      !isInputFocused
     ) {
       event.preventDefault();
-      onBeginEdit();
-      const removedIds = selectedNodeIds;
-      onChange({
-        ...graph,
-        nodes: graph.nodes.filter((node) => !removedIds.has(node.id)),
-        links: graph.links.filter(
-          (link) => !removedIds.has(link.fromNodeId) && !removedIds.has(link.toNodeId),
-        ),
-      });
-      setSelectedNodeIds(new Set());
+      removeSelectedNodes();
     }
   };
 
@@ -1492,14 +1953,41 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                 strokeDasharray="6 4"
               />
             )}
-            {connectionDrag && (
-              <path
-                data-testid="material-node-link-preview"
-                d={`M ${socketPositions[getSocketKey(connectionDrag.fromNodeId, connectionDrag.fromSocket, "output")]?.x ?? connectionDrag.x} ${socketPositions[getSocketKey(connectionDrag.fromNodeId, connectionDrag.fromSocket, "output")]?.y ?? connectionDrag.y} C ${connectionDrag.x + 48} ${socketPositions[getSocketKey(connectionDrag.fromNodeId, connectionDrag.fromSocket, "output")]?.y ?? connectionDrag.y}, ${connectionDrag.x - 48} ${connectionDrag.y}, ${connectionDrag.x} ${connectionDrag.y}`}
-                fill="none"
-                stroke="#f6c453"
-                strokeDasharray="5 4"
-                strokeWidth="2"
+            {connectionDrag &&
+              (() => {
+                const startSocket =
+                  socketPositions[
+                    getSocketKey(
+                      connectionDrag.fromNodeId,
+                      connectionDrag.fromSocket,
+                      connectionDrag.direction,
+                    )
+                  ];
+                const sx = startSocket?.x ?? connectionDrag.x;
+                const sy = startSocket?.y ?? connectionDrag.y;
+                const dirSign = connectionDrag.direction === "output" ? 1 : -1;
+                return (
+                  <path
+                    data-testid="material-node-link-preview"
+                    d={`M ${sx} ${sy} C ${sx + 48 * dirSign} ${sy}, ${connectionDrag.x - 48 * dirSign} ${connectionDrag.y}, ${connectionDrag.x} ${connectionDrag.y}`}
+                    fill="none"
+                    stroke="#f6c453"
+                    strokeDasharray="5 4"
+                    strokeWidth="2"
+                  />
+                );
+              })()}
+            {selectionBox && (
+              <rect
+                data-testid="material-node-selection-box"
+                x={selectionBox.x}
+                y={selectionBox.y}
+                width={selectionBox.width}
+                height={selectionBox.height}
+                fill="rgba(94, 205, 110, 0.14)"
+                stroke="#5ecd6e"
+                strokeWidth="1.5"
+                strokeDasharray="4 3"
               />
             )}
           </svg>
@@ -1517,6 +2005,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                 data-testid="material-node-card"
                 data-node-card="true"
                 data-node-id={node.id}
+                data-collapsed={isCollapsed ? "true" : "false"}
                 data-selected={selectedNodeIds.has(node.id) ? "true" : "false"}
                 tabIndex={isCanvas ? 0 : undefined}
                 className={`space-y-2 rounded-md border bg-[#181b22] p-2 ${
@@ -1535,17 +2024,28 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                   onPointerMove={moveNodeDrag}
                   onPointerUp={finishNodeDrag}
                   onPointerCancel={finishNodeDrag}
-                  onClick={(event) => event.stopPropagation()}
-                  className={`flex items-center justify-between gap-2 border-b border-[#2f3440] pb-1.5 ${
-                    isCanvas ? "cursor-grab touch-none active:cursor-grabbing" : ""
-                  }`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (!isCanvas) {
+                      toggleNodeCollapsed(node.id);
+                    }
+                  }}
+                  className={`flex items-center justify-between gap-2 ${
+                    isCollapsed && definition.inputs.length === 0 && definition.outputs.length === 0
+                      ? ""
+                      : "border-b border-[#2f3440] pb-1.5"
+                  } ${isCanvas ? "cursor-grab touch-none active:cursor-grabbing" : "cursor-pointer"}`}
                 >
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span
                       aria-hidden="true"
                       className="flex h-4 w-4 shrink-0 items-center justify-center text-[#8e95a2]"
                     >
-                      {isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                      {isCollapsed ? (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      )}
                     </span>
                     <h3 className="text-[10px] font-bold uppercase tracking-wide text-[#d7dbe3] truncate">
                       {definition.label}
@@ -1555,7 +2055,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                     <button
                       type="button"
                       aria-label={`Duplicar nodo ${definition.label}`}
-                      onClick={() => duplicateNode(node)}
+                      onClick={() => duplicateSelection(node)}
                       className="rounded p-1 text-[#8e95a2] hover:bg-[#292e38] hover:text-[#d7dbe3]"
                     >
                       <Copy className="h-3.5 w-3.5" />
@@ -1571,24 +2071,30 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                   </div>
                 </header>
 
-                {!isCollapsed && definition.inputs.map((input) => {
+                {definition.inputs.map((input) => {
                   const link = graph.links.find(
                     (item) => item.toNodeId === node.id && item.toSocket === input.id,
                   );
-                  const choices = graph.nodes.flatMap((sourceNode) => {
-                    if (sourceNode.id === node.id) return [];
-                    const outputs = getNodeDefinition(sourceNode.type).outputs;
-                    return outputs
-                      .filter((output) => areMaterialSocketTypesCompatible(output.type, input.type))
-                      .map((output) => ({
-                        value: `${sourceNode.id}::${output.id}`,
-                        label: `${getNodeDefinition(sourceNode.type).label} · ${output.label}`,
-                      }));
-                  });
+                  const choices = isCollapsed
+                    ? []
+                    : graph.nodes.flatMap((sourceNode) => {
+                        if (sourceNode.id === node.id) return [];
+                        const outputs = getNodeDefinition(sourceNode.type).outputs;
+                        return outputs
+                          .filter((output) =>
+                            areMaterialSocketTypesCompatible(output.type, input.type),
+                          )
+                          .map((output) => ({
+                            value: `${sourceNode.id}::${output.id}`,
+                            label: `${getNodeDefinition(sourceNode.type).label} · ${output.label}`,
+                          }));
+                      });
                   return (
                     <div
                       key={input.id}
-                      className="flex min-h-7 items-center gap-1.5 text-[10px] text-[#aeb4c0]"
+                      className={`flex items-center gap-1.5 text-[10px] text-[#aeb4c0] ${
+                        isCollapsed ? "min-h-5" : "min-h-7"
+                      }`}
                     >
                       <button
                         type="button"
@@ -1597,9 +2103,9 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                         data-socket-id={input.id}
                         data-socket-key={getSocketKey(node.id, input.id, "input")}
                         aria-label={`Socket de entrada ${definition.label}: ${input.label}`}
-                        title={`${input.label} · ${input.type}`}
-                        className="flex h-5 w-4 shrink-0 items-center justify-center"
-                        onPointerDown={(event) => event.stopPropagation()}
+                        title={`${input.label} · ${input.type} (arrastra a una salida)`}
+                        className="flex h-5 w-4 shrink-0 items-center justify-center touch-none"
+                        onPointerDown={(event) => startConnectionDrag(event, node, input.id, "input")}
                       >
                         <span
                           className="h-2.5 w-2.5 rounded-full border border-[#111318]"
@@ -1607,20 +2113,22 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                         />
                       </button>
                       <span className="min-w-0 flex-1 truncate">{input.label}</span>
-                      <select
-                        aria-label={`${definition.label}: ${input.label}`}
-                        value={link ? `${link.fromNodeId}::${link.fromSocket}` : ""}
-                        onFocus={onBeginEdit}
-                        onChange={(event) => setInputLink(node, input.id, event.target.value)}
-                        className="h-7 min-w-0 max-w-[50%] rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1] outline-none focus:border-[#5ecd6e]"
-                      >
-                        <option value="">Sin conexión</option>
-                        {choices.map((choice) => (
-                          <option key={choice.value} value={choice.value}>
-                            {choice.label}
-                          </option>
-                        ))}
-                      </select>
+                      {!isCollapsed && (
+                        <select
+                          aria-label={`${definition.label}: ${input.label}`}
+                          value={link ? `${link.fromNodeId}::${link.fromSocket}` : ""}
+                          onFocus={onBeginEdit}
+                          onChange={(event) => setInputLink(node, input.id, event.target.value)}
+                          className="h-7 min-w-0 max-w-[50%] rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1] outline-none focus:border-[#5ecd6e]"
+                        >
+                          <option value="">Sin conexión</option>
+                          {choices.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.label}
+                            </option>
+                          ))}
+                        </select>
+                      )}
                     </div>
                   );
                 })}
@@ -2141,6 +2649,315 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                     onChange={(values) => updateNode(node.id, values)}
                   />
                 )}
+
+                {!isCollapsed && node.type === "noise_texture" && (() => {
+                  const dimensions = String(node.values.dimensions ?? "3D");
+                  const isConnected = (sock: string) =>
+                    graph.links.some((l) => l.toNodeId === node.id && l.toSocket === sock);
+                  return (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex flex-1 items-center justify-between gap-1.5 text-[10px] text-[#aeb4c0]">
+                          <span>Dimensiones</span>
+                          <select
+                            aria-label="Dimensiones Noise Texture"
+                            value={dimensions}
+                            onFocus={onBeginEdit}
+                            onChange={(event) => updateNode(node.id, { dimensions: event.target.value })}
+                            className="h-7 rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                          >
+                            <option value="1D">1D</option>
+                            <option value="2D">2D</option>
+                            <option value="3D">3D</option>
+                            <option value="4D">4D</option>
+                          </select>
+                        </label>
+                        <label className="flex items-center gap-1.5 text-[10px] text-[#aeb4c0]">
+                          <input
+                            type="checkbox"
+                            aria-label="Normalizar Noise Texture"
+                            checked={node.values.normalize !== false}
+                            onChange={(event) =>
+                              updateNode(node.id, { normalize: event.target.checked })
+                            }
+                            className="accent-[#5ecd6e]"
+                          />
+                          Normalizar
+                        </label>
+                      </div>
+                      {(dimensions === "4D" || dimensions === "1D") && (
+                        <NodeNumericBar
+                          label="W"
+                          ariaLabel="W Noise Texture"
+                          value={Number(node.values.w ?? 0)}
+                          min={-10}
+                          max={10}
+                          step={0.05}
+                          connected={isConnected("w")}
+                          onBeginEdit={onBeginEdit}
+                          onChange={(val) => updateNode(node.id, { w: val })}
+                        />
+                      )}
+                      <NodeNumericBar
+                        label="Escala"
+                        ariaLabel="Escala Noise Texture"
+                        value={Number(node.values.scale ?? 5)}
+                        min={0.1}
+                        max={40}
+                        step={0.1}
+                        connected={isConnected("scale")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { scale: val })}
+                      />
+                      <NodeNumericBar
+                        label="Detalle"
+                        ariaLabel="Detalle Noise Texture"
+                        value={Number(node.values.detail ?? 2)}
+                        min={0}
+                        max={15}
+                        step={0.1}
+                        clampMin={0}
+                        clampMax={15}
+                        connected={isConnected("detail")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { detail: val })}
+                      />
+                      <NodeNumericBar
+                        label="Rugosidad"
+                        ariaLabel="Rugosidad Noise Texture"
+                        value={Number(node.values.roughness ?? 0.5)}
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        clampMin={0}
+                        clampMax={1}
+                        connected={isConnected("roughness")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { roughness: val })}
+                      />
+                      <NodeNumericBar
+                        label="Lagunaridad"
+                        ariaLabel="Lagunaridad Noise Texture"
+                        value={Number(node.values.lacunarity ?? 2)}
+                        min={0.1}
+                        max={8}
+                        step={0.05}
+                        clampMin={0.01}
+                        connected={isConnected("lacunarity")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { lacunarity: val })}
+                      />
+                      <NodeNumericBar
+                        label="Desplazamiento"
+                        ariaLabel="Desplazamiento Noise Texture"
+                        value={Number(node.values.offset ?? 0)}
+                        min={-2}
+                        max={2}
+                        step={0.05}
+                        connected={isConnected("offset")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { offset: val })}
+                      />
+                      <NodeNumericBar
+                        label="Distorsión"
+                        ariaLabel="Distorsión Noise Texture"
+                        value={Number(node.values.distortion ?? 0)}
+                        min={-5}
+                        max={5}
+                        step={0.05}
+                        connected={isConnected("distortion")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { distortion: val })}
+                      />
+                    </div>
+                  );
+                })()}
+
+                {!isCollapsed && node.type === "voronoi_texture" && (() => {
+                  const dimensions = String(node.values.dimensions ?? "3D");
+                  const feature = String(node.values.feature ?? "f1");
+                  const distanceMetric = String(node.values.distanceMetric ?? "euclidean");
+                  const detail = Number(node.values.detail ?? 0);
+                  const isConnected = (sock: string) =>
+                    graph.links.some((l) => l.toNodeId === node.id && l.toSocket === sock);
+                  return (
+                    <div className="space-y-1.5">
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <label className="space-y-0.5 text-[10px] text-[#aeb4c0]">
+                          <span>Dimensiones</span>
+                          <select
+                            aria-label="Dimensiones Voronoi Texture"
+                            value={dimensions}
+                            onFocus={onBeginEdit}
+                            onChange={(event) => updateNode(node.id, { dimensions: event.target.value })}
+                            className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                          >
+                            <option value="1D">1D</option>
+                            <option value="2D">2D</option>
+                            <option value="3D">3D</option>
+                            <option value="4D">4D</option>
+                          </select>
+                        </label>
+                        <label className="space-y-0.5 text-[10px] text-[#aeb4c0]">
+                          <span>Característica</span>
+                          <select
+                            aria-label="Característica Voronoi Texture"
+                            value={feature}
+                            onFocus={onBeginEdit}
+                            onChange={(event) => updateNode(node.id, { feature: event.target.value })}
+                            className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                          >
+                            <option value="f1">F1</option>
+                            <option value="f2">F2</option>
+                            <option value="smooth_f1">Smooth F1</option>
+                            <option value="distance_to_edge">Distance to Edge</option>
+                            <option value="n_sphere_radius">N-Sphere Radius</option>
+                          </select>
+                        </label>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex flex-1 items-center justify-between gap-1.5 text-[10px] text-[#aeb4c0]">
+                          <span>Métrica</span>
+                          <select
+                            aria-label="Métrica Voronoi Texture"
+                            value={distanceMetric}
+                            onFocus={onBeginEdit}
+                            onChange={(event) =>
+                              updateNode(node.id, { distanceMetric: event.target.value })
+                            }
+                            className="h-7 min-w-0 flex-1 rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                          >
+                            <option value="euclidean">Euclidean</option>
+                            <option value="manhattan">Manhattan</option>
+                            <option value="chebychev">Chebychev</option>
+                            <option value="minkowski">Minkowski</option>
+                          </select>
+                        </label>
+                        <label className="flex items-center gap-1.5 text-[10px] text-[#aeb4c0]">
+                          <input
+                            type="checkbox"
+                            aria-label="Normalizar Voronoi Texture"
+                            checked={Boolean(node.values.normalize)}
+                            onChange={(event) =>
+                              updateNode(node.id, { normalize: event.target.checked })
+                            }
+                            className="accent-[#5ecd6e]"
+                          />
+                          Normalizar
+                        </label>
+                      </div>
+                      {(dimensions === "4D" || dimensions === "1D") && (
+                        <NodeNumericBar
+                          label="W"
+                          ariaLabel="W Voronoi Texture"
+                          value={Number(node.values.w ?? 0)}
+                          min={-10}
+                          max={10}
+                          step={0.05}
+                          connected={isConnected("w")}
+                          onBeginEdit={onBeginEdit}
+                          onChange={(val) => updateNode(node.id, { w: val })}
+                        />
+                      )}
+                      <NodeNumericBar
+                        label="Escala"
+                        ariaLabel="Escala Voronoi Texture"
+                        value={Number(node.values.scale ?? 5)}
+                        min={0.1}
+                        max={40}
+                        step={0.1}
+                        connected={isConnected("scale")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { scale: val })}
+                      />
+                      <NodeNumericBar
+                        label="Detalle"
+                        ariaLabel="Detalle Voronoi Texture"
+                        value={detail}
+                        min={0}
+                        max={15}
+                        step={0.1}
+                        clampMin={0}
+                        clampMax={15}
+                        connected={isConnected("detail")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { detail: val })}
+                      />
+                      {detail > 0 && (
+                        <>
+                          <NodeNumericBar
+                            label="Rugosidad"
+                            ariaLabel="Rugosidad Voronoi Texture"
+                            value={Number(node.values.roughness ?? 0.5)}
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            clampMin={0}
+                            clampMax={1}
+                            connected={isConnected("roughness")}
+                            onBeginEdit={onBeginEdit}
+                            onChange={(val) => updateNode(node.id, { roughness: val })}
+                          />
+                          <NodeNumericBar
+                            label="Lagunaridad"
+                            ariaLabel="Lagunaridad Voronoi Texture"
+                            value={Number(node.values.lacunarity ?? 2)}
+                            min={0.1}
+                            max={8}
+                            step={0.05}
+                            clampMin={0.01}
+                            connected={isConnected("lacunarity")}
+                            onBeginEdit={onBeginEdit}
+                            onChange={(val) => updateNode(node.id, { lacunarity: val })}
+                          />
+                        </>
+                      )}
+                      {feature === "smooth_f1" && (
+                        <NodeNumericBar
+                          label="Suavizado"
+                          ariaLabel="Suavizado Voronoi Texture"
+                          value={Number(node.values.smoothness ?? 1)}
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          clampMin={0}
+                          clampMax={1}
+                          connected={isConnected("smoothness")}
+                          onBeginEdit={onBeginEdit}
+                          onChange={(val) => updateNode(node.id, { smoothness: val })}
+                        />
+                      )}
+                      {distanceMetric === "minkowski" && (
+                        <NodeNumericBar
+                          label="Exponente"
+                          ariaLabel="Exponente Voronoi Texture"
+                          value={Number(node.values.exponent ?? 0.5)}
+                          min={0.1}
+                          max={8}
+                          step={0.05}
+                          clampMin={0.05}
+                          connected={isConnected("exponent")}
+                          onBeginEdit={onBeginEdit}
+                          onChange={(val) => updateNode(node.id, { exponent: val })}
+                        />
+                      )}
+                      <NodeNumericBar
+                        label="Aleatoriedad"
+                        ariaLabel="Aleatoriedad Voronoi Texture"
+                        value={Number(node.values.randomness ?? 1)}
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        clampMin={0}
+                        clampMax={1}
+                        connected={isConnected("randomness")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { randomness: val })}
+                      />
+                    </div>
+                  );
+                })()}
+
                 {definition.outputs.length > 0 && (
                   <div className={`space-y-1 ${!isCollapsed ? "border-t border-[#2f3440] pt-1.5" : ""}`}>
                     {definition.outputs.map((output) => (
@@ -2157,8 +2974,8 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                           data-socket-key={getSocketKey(node.id, output.id, "output")}
                           aria-label={`Socket de salida ${definition.label}: ${output.label}`}
                           title={`${output.label} · ${output.type} (arrastra a una entrada)`}
-                          className="flex h-5 w-4 shrink-0 items-center justify-center"
-                          onPointerDown={(event) => startConnectionDrag(event, node, output.id)}
+                          className="flex h-5 w-4 shrink-0 items-center justify-center touch-none"
+                          onPointerDown={(event) => startConnectionDrag(event, node, output.id, "output")}
                         >
                           <span
                             className="h-2.5 w-2.5 rounded-full border border-[#111318]"
@@ -2291,16 +3108,54 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     );
   }
 
+  const reserveWrench = Boolean(
+    splitContext && !splitContext.sceneVisible && splitContext.reserveTopLeftWrench,
+  );
+  const reserveCorner = Boolean(
+    splitContext &&
+      !splitContext.sceneVisible &&
+      splitContext.reserveTopLeftCorner &&
+      splitContext.reserveTopLeftWrench,
+  );
+  const toolbarPositionClass = reserveCorner
+    ? "top-[98px] left-2 right-2 sm:top-2 sm:left-[196px]"
+    : reserveWrench
+      ? "top-[50px] left-2 right-2 sm:top-2 sm:left-[196px]"
+      : "top-2 left-2 right-2";
+
   return (
     <div
       data-testid="material-node-canvas-shell"
       className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-[#121418]"
     >
-      <div className="pointer-events-none absolute top-2 left-2 right-2 z-10 flex flex-wrap items-center justify-between gap-2">
+      <div
+        className={`pointer-events-none absolute ${toolbarPositionClass} z-20 flex flex-wrap items-center justify-between gap-2`}
+      >
         <div
           onPointerDown={(event) => event.stopPropagation()}
           className="pointer-events-auto flex min-w-0 max-w-full flex-wrap items-center gap-1.5 rounded-md border border-[#2b2e36] bg-[#16181d]/90 p-1 shadow-md backdrop-blur-sm"
         >
+          {splitContext && (
+            <button
+              type="button"
+              data-testid="material-toggle-3d-viewport"
+              aria-label={splitContext.sceneVisible ? "Ocultar visor 3D" : "Mostrar visor 3D"}
+              title={
+                splitContext.sceneVisible
+                  ? "Ocultar el visor 3D y ampliar el editor de nodos"
+                  : "Mostrar el visor 3D conservando la escena y el tamaño anterior"
+              }
+              onClick={splitContext.toggleSceneVisible}
+              className="flex min-h-10 shrink-0 items-center gap-2 rounded-md border border-[#5ecd6e]/70 bg-[#1c2320] px-3 text-[11px] font-semibold text-[#e2f5e6] hover:border-[#5ecd6e] hover:bg-[#253129] hover:text-white shadow-sm touch-manipulation"
+            >
+              {splitContext.sceneVisible ? (
+                <EyeOff aria-hidden="true" className="h-4 w-4 text-[#5ecd6e]" />
+              ) : (
+                <Eye aria-hidden="true" className="h-4 w-4 text-[#5ecd6e]" />
+              )}
+              <span>{splitContext.sceneVisible ? "Ocultar visor 3D" : "Mostrar visor 3D"}</span>
+            </button>
+          )}
           {toolbarStart}
           {addNodeSelect}
         </div>
@@ -2308,6 +3163,22 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
           onPointerDown={(event) => event.stopPropagation()}
           className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-md border border-[#2b2e36] bg-[#16181d]/90 p-1 shadow-md backdrop-blur-sm"
         >
+          <label
+            className="hidden sm:flex items-center gap-1 pr-1 text-[10px] text-[#9aa3b2]"
+            title="Velocidad de paneo automático al arrastrar conexiones cerca de los bordes"
+          >
+            <span>Auto-paneo</span>
+            <select
+              aria-label="Velocidad de paneo automático"
+              value={String(autoPanSpeed)}
+              onChange={(event) => setAutoPanSpeed(Number(event.target.value))}
+              className="h-7 rounded border border-[#343a46] bg-[#181b22] px-1 text-[10px] text-[#cbd5e1] outline-none focus:border-[#5ecd6e]"
+            >
+              <option value="0.5">0.5x</option>
+              <option value="1">1x</option>
+              <option value="1.8">1.8x</option>
+            </select>
+          </label>
           <button
             type="button"
             aria-label="Alejar el editor de nodos"
@@ -2337,6 +3208,44 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
           </button>
         </div>
       </div>
+
+      {selectedNodeIds.size > 1 && (
+        <div
+          data-testid="material-node-multiselection-bar"
+          onPointerDown={(event) => event.stopPropagation()}
+          className="absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-[#5ecd6e]/60 bg-[#16181d]/95 px-3 py-1.5 text-[11px] text-[#e2e8f0] shadow-xl backdrop-blur-sm"
+        >
+          <span className="font-semibold text-[#5ecd6e]">
+            {selectedNodeIds.size} nodos seleccionados
+          </span>
+          <button
+            type="button"
+            aria-label="Duplicar selección"
+            onClick={() => duplicateSelection()}
+            className="flex items-center gap-1 rounded border border-[#343a46] bg-[#181b22] px-2 py-1 text-[10px] hover:border-[#5ecd6e]"
+          >
+            <Copy className="h-3 w-3" />
+            Duplicar
+          </button>
+          <button
+            type="button"
+            aria-label="Eliminar selección"
+            onClick={removeSelectedNodes}
+            className="flex items-center gap-1 rounded border border-[#343a46] bg-[#181b22] px-2 py-1 text-[10px] text-[#fca5a5] hover:border-[#f87171]"
+          >
+            <Trash2 className="h-3 w-3" />
+            Eliminar
+          </button>
+          <button
+            type="button"
+            aria-label="Limpiar selección"
+            onClick={() => setSelectedNodeIds(new Set())}
+            className="rounded p-1 text-[#8e95a2] hover:bg-[#292e38] hover:text-white"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {(!evaluation.ok || connectionError || fileError) && (
         <div className="pointer-events-none absolute bottom-2 left-2 z-10 max-w-[calc(100%-5rem)] space-y-1">

@@ -784,8 +784,14 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
     onEffectiveModifiersChange?.(effectiveModifiers);
   }, [effectiveModifiers, onEffectiveModifiersChange]);
 
+  const isCleanBlack = Boolean(settings.cleanBlackViewport);
+
   return (
-    <main className="relative flex-1 min-w-0 h-full flex flex-col bg-[#1d1f24] overflow-hidden select-none">
+    <main
+      className={`relative flex-1 min-w-0 h-full flex flex-col overflow-hidden select-none ${
+        isCleanBlack ? 'bg-black' : 'bg-[#1d1f24]'
+      }`}
+    >
       {/* Dedicated WebGL Mount Container */}
       <div
         ref={viewportContainerRef}
@@ -838,7 +844,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
         )}
 
         {/* Top-Left: Trackball HUD Indicator only (tool & sub-mode selectors moved to LeftToolSidebar) */}
-        {trackballActive && (
+        {!isCleanBlack && trackballActive && (
           <div
             className={`absolute top-3 ${
               reserveTopLeftCorner || reserveTopLeftWrench
@@ -859,14 +865,16 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
         )}
 
         {/* Top-Right: Interactive Z-Up Orientation Gizmo & Camera Rotation Lock */}
-        <div className="absolute top-3 right-3 z-15 pointer-events-none">
-          <AxisGizmoWidget
-            ref={gizmoRef}
-            cameraRotationLocked={cameraRotationLocked}
-            onSelectPreset={handleSelectCameraPreset}
-            onToggleCameraRotationLock={onToggleCameraRotationLock}
-          />
-        </div>
+        {!isCleanBlack && (
+          <div className="absolute top-3 right-3 z-15 pointer-events-none">
+            <AxisGizmoWidget
+              ref={gizmoRef}
+              cameraRotationLocked={cameraRotationLocked}
+              onSelectPreset={handleSelectCameraPreset}
+              onToggleCameraRotationLock={onToggleCameraRotationLock}
+            />
+          </div>
+        )}
 
         {/* Long-Press Contextual Menu */}
         {contextMenu && (

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { EditableMesh, Vec3 } from './EditableMesh';
 import { SculptBrushType, SculptSettings, SculptSymmetryAxes } from '../project/types';
+import { applyDyntopoAroundWorldPoint } from './dyntopo';
 
 export interface SculptBrushDescriptor {
   id: SculptBrushType;
@@ -90,6 +91,12 @@ export const DEFAULT_SCULPT_SETTINGS: SculptSettings = {
   invert: false,
   symmetry: { x: false, y: false, z: false },
   strokeSmoothing: 0.35,
+  dyntopo: {
+    enabled: false,
+    detailSize: 0.14,
+    subdivide: true,
+    collapse: true,
+  },
 };
 
 interface GrabCapturedVertex {
@@ -114,6 +121,8 @@ export interface SculptStrokeSession {
   grabCaptured: GrabCapturedVertex[];
   grabInitialLocalPositions: Map<string, Vec3>;
   hasModified: boolean;
+  maxFaces: number;
+  dyntopoBudgetReached: boolean;
 }
 
 function getSymmetryCombinations(sym: SculptSymmetryAxes): [number, number, number][] {
@@ -164,6 +173,7 @@ export function createSculptStrokeSession(params: {
   settings: SculptSettings;
   worldHit: THREE.Vector3;
   worldNormal: THREE.Vector3;
+  maxFaces?: number;
 }): SculptStrokeSession {
   const beforeMesh = params.mesh.clone();
   const workingMesh = params.mesh.clone();
@@ -218,6 +228,9 @@ export function createSculptStrokeSession(params: {
     settings: {
       ...params.settings,
       symmetry: { ...params.settings.symmetry },
+      dyntopo: params.settings.dyntopo
+        ? { ...params.settings.dyntopo }
+        : { ...DEFAULT_SCULPT_SETTINGS.dyntopo! },
     },
     matrixWorld,
     matrixWorldInv,
@@ -228,6 +241,8 @@ export function createSculptStrokeSession(params: {
     grabCaptured,
     grabInitialLocalPositions,
     hasModified: false,
+    maxFaces: params.maxFaces ?? 220_000,
+    dyntopoBudgetReached: false,
   };
 }
 
@@ -268,7 +283,29 @@ function applySurfaceDab(
   dabWorldNormal: THREE.Vector3,
   dabWorldDir: THREE.Vector3,
 ): boolean {
-  const { workingMesh, settings, matrixWorld, matrixWorldInv, adjacency } = session;
+  const { workingMesh, settings, matrixWorld, matrixWorldInv } = session;
+  let dyntopoModified = false;
+  if (settings.dyntopo?.enabled && settings.brush !== 'grab') {
+    const dynRes = applyDyntopoAroundWorldPoint({
+      mesh: workingMesh,
+      matrixWorld,
+      matrixWorldInv,
+      worldHit: dabWorldHit,
+      brushRadius: Math.max(0.02, settings.radius),
+      symmetry: settings.symmetry,
+      dyntopo: settings.dyntopo,
+      maxFaces: session.maxFaces,
+    });
+    if (dynRes.hitBudgetLimit) {
+      session.dyntopoBudgetReached = true;
+    }
+    if (dynRes.modified) {
+      session.adjacency = buildVertexAdjacency(workingMesh);
+      session.hasModified = true;
+      dyntopoModified = true;
+    }
+  }
+  const { adjacency } = session;
   const brush = settings.brush;
   const radius = Math.max(0.02, settings.radius);
   const strength = Math.max(0.01, Math.min(1, settings.strength));
@@ -529,7 +566,7 @@ function applySurfaceDab(
   if (changed) {
     session.hasModified = true;
   }
-  return changed;
+  return changed || dyntopoModified;
 }
 
 export function stepSculptStroke(

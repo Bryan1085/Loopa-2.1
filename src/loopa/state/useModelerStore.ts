@@ -24,6 +24,28 @@ import {
   DEFAULT_SCULPT_SETTINGS,
 } from '../core/mesh/sculptBrushes';
 import {
+  addMultiresLevelAsync,
+  commitMeshChangesToMultires,
+  deleteMultiresHigherLevels as pruneMultiresHigherLevels,
+  evaluateMultiresLevelAsync,
+  switchMultiresLevelAsync,
+} from '../core/mesh/multiresolution';
+import {
+  globalGeometryLockManager,
+  ObjectOperationConflictError,
+} from '../core/mesh/progressiveRunner';
+import {
+  computeAdaptiveBudgets,
+  estimateGeometryOperationResources,
+  GeometryOperationResourceEstimate,
+  probeRuntimeDeviceCapabilities,
+  purgeGeometryCaches,
+} from '../core/mesh/resourceManager';
+import {
+  estimateVoxelRemeshStats,
+  runVoxelRemeshAsync,
+} from '../core/mesh/voxelRemesh';
+import {
   cloneDefaultRadialLayouts,
   cloneDefaultWorkspaceToolLayouts,
   DEFAULT_BARHOME_RADIAL_LAYOUT,
@@ -190,6 +212,7 @@ import {
   MaterialAsset,
   ModelerSettings,
   MoveSubMode,
+  MultiresSubdivisionMode,
   ObjectShadingMode,
   ObjectTransform,
   ObjectTransformChange,
@@ -223,6 +246,14 @@ export type ToolResetTarget =
   | 'rotate'
   | 'scale'
   | 'proportional';
+
+export interface ActiveGeometryTaskState {
+  objectId: string;
+  label: string;
+  progress: number;
+  stage: string;
+  cancel: () => void;
+}
 import { SerializedEditableMesh } from '../core/mesh/EditableMesh';
 import type { ProjectEcosystemMeta } from '../core/ecosystem/types';
 import {
@@ -524,6 +555,9 @@ export function useModelerStore() {
     useState<ModalTransformState | null>(null);
   const [modalCancelNonce, setModalCancelNonce] = useState(0);
   const [loopCutPickError, setLoopCutPickError] = useState<string | null>(null);
+  const [activeGeometryTask, setActiveGeometryTask] =
+    useState<ActiveGeometryTaskState | null>(null);
+  const [lastGeometryWarning, setLastGeometryWarning] = useState<string | null>(null);
 
   const undoStackRef = useRef<HistorySnapshot[]>([]);
   const redoStackRef = useRef<HistorySnapshot[]>([]);
@@ -2072,9 +2106,30 @@ export function useModelerStore() {
       setProject((p) =>
         updateActiveScene(p, (scene) => ({
           ...scene,
-          objects: scene.objects.map((o) =>
-            o.id === objectId ? { ...o, mesh: cleanAfterMesh.toJSON() } : o,
-          ),
+          objects: scene.objects.map((o) => {
+            if (o.id !== objectId) return o;
+            const nextSerialized = cleanAfterMesh.toJSON();
+            let nextMultires = o.multires;
+            if (nextMultires) {
+              if (
+                o.mesh.vertices.length === cleanAfterMesh.vertices.length &&
+                o.mesh.faces.length === cleanAfterMesh.faces.length
+              ) {
+                nextMultires = commitMeshChangesToMultires(
+                  nextMultires,
+                  cleanAfterMesh,
+                  nextMultires.currentLevel,
+                );
+              } else {
+                nextMultires = undefined;
+              }
+            }
+            return {
+              ...o,
+              mesh: nextSerialized,
+              multires: nextMultires,
+            };
+          }),
         })),
       );
       setHasUnsavedChanges(true);
@@ -3736,6 +3791,12 @@ export function useModelerStore() {
         symmetry: patch.symmetry
           ? { ...prev.symmetry, ...patch.symmetry }
           : prev.symmetry,
+        dyntopo: patch.dyntopo
+          ? {
+              ...(prev.dyntopo ?? DEFAULT_SCULPT_SETTINGS.dyntopo!),
+              ...patch.dyntopo,
+            }
+          : prev.dyntopo,
       }));
     },
     [],
@@ -3752,9 +3813,30 @@ export function useModelerStore() {
         ...p,
         scenes: p.scenes.map((scene) => ({
           ...scene,
-          objects: scene.objects.map((o) =>
-            o.id === objectId ? { ...o, mesh: serialized } : o,
-          ),
+          objects: scene.objects.map((o) => {
+            if (o.id !== objectId) return o;
+            let nextMultires = o.multires;
+            if (nextMultires) {
+              if (
+                o.mesh.vertices.length === nextMesh.vertices.length &&
+                o.mesh.faces.length === nextMesh.faces.length
+              ) {
+                nextMultires = commitMeshChangesToMultires(
+                  nextMultires,
+                  nextMesh,
+                  nextMultires.currentLevel,
+                );
+              } else {
+                // Topology modified (e.g., Dyntopo): clear incompatible multires hierarchy cleanly
+                nextMultires = undefined;
+              }
+            }
+            return {
+              ...o,
+              mesh: serialized,
+              multires: nextMultires,
+            };
+          }),
         })),
       }));
       setHasUnsavedChanges(true);
@@ -5092,6 +5174,498 @@ export function useModelerStore() {
   );
 
   /* ==========================================================================
+   * Multiresolution, Progressive Geometry, Resource Limits & Voxel Remesh
+   * ======================================================================== */
+  const cancelActiveGeometryTask = useCallback(() => {
+    if (!activeGeometryTask) return;
+    activeGeometryTask.cancel();
+  }, [activeGeometryTask]);
+
+  const purgeGeometryCachesAction = useCallback(() => {
+    purgeGeometryCaches();
+    showToast('Cachés temporales de geometría liberadas de forma segura');
+  }, [showToast]);
+
+  const addMultiresLevel = useCallback(
+    async (
+      objectId: string,
+      mode?: MultiresSubdivisionMode,
+      forceConfirm = false,
+    ): Promise<{
+      ok: boolean;
+      requiresConfirmation?: boolean;
+      estimate?: GeometryOperationResourceEstimate;
+      error?: string;
+    }> => {
+      const target = activeObjects.find((o) => o.id === objectId);
+      if (!target || target.objectType !== 'mesh') {
+        return { ok: false, error: 'Objeto no válido para Multiresolución' };
+      }
+      if (target.locked) {
+        showToast('Desbloquea el objeto antes de subdividir');
+        return { ok: false, error: 'Objeto bloqueado' };
+      }
+
+      const sourceMesh = EditableMesh.fromJSON(target.mesh);
+      const currentAtMaxFaces = target.multires
+        ? Math.max(
+            target.mesh.faces.length,
+            target.multires.baseMesh.faces.length * Math.pow(4, target.multires.maxLevel),
+          )
+        : target.mesh.faces.length;
+      const currentAtMaxVerts = target.multires
+        ? Math.max(
+            target.mesh.vertices.length,
+            target.multires.baseMesh.vertices.length * Math.pow(4, target.multires.maxLevel),
+          )
+        : target.mesh.vertices.length;
+
+      const estimate = estimateGeometryOperationResources({
+        operation: 'multires_subdivide',
+        currentVertices: currentAtMaxVerts,
+        currentFaces: currentAtMaxFaces,
+        levelDelta: 1,
+        sceneObjects: activeObjects,
+        limits: settings.geometryLimits,
+      });
+
+      if (!estimate.canProceed) {
+        setLastGeometryWarning(estimate.message);
+        showToast(estimate.message);
+        return { ok: false, estimate, error: estimate.message };
+      }
+      if (estimate.requiresConfirmation && !forceConfirm) {
+        setLastGeometryWarning(estimate.message);
+        return { ok: false, requiresConfirmation: true, estimate };
+      }
+
+      let lock;
+      try {
+        lock = globalGeometryLockManager.acquire(objectId, 'Subdividiendo Multiresolución');
+      } catch (err) {
+        const msg =
+          err instanceof ObjectOperationConflictError
+            ? err.message
+            : 'El objeto está ocupado con otra operación.';
+        showToast(msg);
+        return { ok: false, error: msg };
+      }
+
+      const cancelFn = () => {
+        globalGeometryLockManager.cancel(objectId);
+      };
+      setActiveGeometryTask({
+        objectId,
+        label: 'Subdividiendo Multiresolución',
+        progress: 0.05,
+        stage: 'Preparando nivel…',
+        cancel: cancelFn,
+      });
+
+      try {
+        const res = await addMultiresLevelAsync(sourceMesh, target.multires, {
+          mode: mode ?? target.multires?.mode ?? 'catmull_clark',
+          shading: target.shading,
+          signal: lock.abortController.signal,
+          onProgress: (ratio, stage) => {
+            globalGeometryLockManager.updateProgress(objectId, lock.taskId, ratio, stage);
+            setActiveGeometryTask((prev) =>
+              prev && prev.objectId === objectId
+                ? { ...prev, progress: ratio, stage }
+                : prev,
+            );
+          },
+        });
+
+        if (res.status === 'cancelled') {
+          showToast('Subdivisión cancelada — geometría intacta');
+          return { ok: false, error: 'Cancelado' };
+        }
+        if (res.status === 'error') {
+          showToast(res.error);
+          return { ok: false, error: res.error };
+        }
+
+        const { multires, mesh } = res.result;
+        if (estimate.riskLevel === 'elevated' || estimate.riskLevel === 'critical') {
+          setLastGeometryWarning(estimate.message);
+        } else {
+          setLastGeometryWarning(null);
+        }
+
+        pushHistory(makeSnapshot());
+        markTimelapseOp(
+          'multires_subdivide',
+          `Multires Nivel ${multires.maxLevel} (${target.name})`,
+        );
+        const serialized = mesh.toJSON();
+        setProject((p) =>
+          updateActiveScene(p, (scene) => ({
+            ...scene,
+            objects: scene.objects.map((o) =>
+              o.id === objectId ? { ...o, mesh: serialized, multires } : o,
+            ),
+          })),
+        );
+        savedEditSelectionsRef.current.delete(objectId);
+        if (workMode === 'edit' && selectedObjectId === objectId) {
+          setSelectedComponentIds(new Set());
+        }
+        setHasUnsavedChanges(true);
+        setMeshRevision((r) => r + 1);
+        showToast(
+          `Nivel Multires ${multires.maxLevel} listo (${mesh.faces.length.toLocaleString()} caras)`,
+        );
+        return { ok: true, estimate };
+      } finally {
+        globalGeometryLockManager.release(objectId, lock.taskId);
+        setActiveGeometryTask((prev) => (prev?.objectId === objectId ? null : prev));
+      }
+    },
+    [
+      activeObjects,
+      makeSnapshot,
+      markTimelapseOp,
+      pushHistory,
+      selectedObjectId,
+      settings.geometryLimits,
+      showToast,
+      workMode,
+    ],
+  );
+
+  const setMultiresLevel = useCallback(
+    async (objectId: string, level: number): Promise<boolean> => {
+      const target = activeObjects.find((o) => o.id === objectId);
+      if (!target || target.objectType !== 'mesh' || !target.multires) return false;
+      if (target.locked) {
+        showToast('Desbloquea el objeto antes de cambiar de nivel');
+        return false;
+      }
+      const clamped = Math.max(0, Math.min(target.multires.maxLevel, Math.round(level)));
+      if (clamped === target.multires.currentLevel) return true;
+
+      let lock;
+      try {
+        lock = globalGeometryLockManager.acquire(objectId, `Cambiando a nivel ${clamped}`);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Operación en curso');
+        return false;
+      }
+
+      setActiveGeometryTask({
+        objectId,
+        label: `Cambiando a Nivel ${clamped}`,
+        progress: 0.1,
+        stage: 'Evaluando desplazamientos…',
+        cancel: () => globalGeometryLockManager.cancel(objectId),
+      });
+
+      try {
+        const res = await switchMultiresLevelAsync(target.multires, clamped, {
+          shading: target.shading,
+          signal: lock.abortController.signal,
+          onProgress: (ratio, stage) => {
+            globalGeometryLockManager.updateProgress(objectId, lock.taskId, ratio, stage);
+            setActiveGeometryTask((prev) =>
+              prev && prev.objectId === objectId
+                ? { ...prev, progress: ratio, stage }
+                : prev,
+            );
+          },
+        });
+        if (res.status !== 'completed') {
+          if (res.status === 'cancelled') showToast('Cambio de nivel cancelado');
+          else showToast(res.error);
+          return false;
+        }
+        pushHistory(makeSnapshot());
+        const serialized = res.result.mesh.toJSON();
+        setProject((p) =>
+          updateActiveScene(p, (scene) => ({
+            ...scene,
+            objects: scene.objects.map((o) =>
+              o.id === objectId
+                ? { ...o, mesh: serialized, multires: res.result.multires }
+                : o,
+            ),
+          })),
+        );
+        savedEditSelectionsRef.current.delete(objectId);
+        if (workMode === 'edit' && selectedObjectId === objectId) {
+          setSelectedComponentIds(new Set());
+        }
+        setHasUnsavedChanges(true);
+        setMeshRevision((r) => r + 1);
+        return true;
+      } finally {
+        globalGeometryLockManager.release(objectId, lock.taskId);
+        setActiveGeometryTask((prev) => (prev?.objectId === objectId ? null : prev));
+      }
+    },
+    [activeObjects, makeSnapshot, pushHistory, selectedObjectId, showToast, workMode],
+  );
+
+  const setMultiresViewportLevel = useCallback(
+    (objectId: string, viewportLevel: number) => {
+      setProject((p) =>
+        updateActiveScene(p, (scene) => ({
+          ...scene,
+          objects: scene.objects.map((o) => {
+            if (o.id !== objectId || !o.multires) return o;
+            const clamped = Math.max(
+              0,
+              Math.min(o.multires.currentLevel, Math.round(viewportLevel)),
+            );
+            return {
+              ...o,
+              multires: { ...o.multires, viewportLevel: clamped },
+            };
+          }),
+        })),
+      );
+      setHasUnsavedChanges(true);
+      setMeshRevision((r) => r + 1);
+    },
+    [],
+  );
+
+  const toggleMultiresAutoLod = useCallback((objectId: string, enabled: boolean) => {
+    setProject((p) =>
+      updateActiveScene(p, (scene) => ({
+        ...scene,
+        objects: scene.objects.map((o) => {
+          if (o.id !== objectId || !o.multires) return o;
+          return {
+            ...o,
+            multires: { ...o.multires, autoViewportLod: enabled },
+          };
+        }),
+      })),
+    );
+    setHasUnsavedChanges(true);
+  }, []);
+
+  const setMultiresMode = useCallback(
+    async (objectId: string, mode: MultiresSubdivisionMode) => {
+      const target = activeObjects.find((o) => o.id === objectId);
+      if (!target || !target.multires || target.multires.mode === mode) return;
+      const nextMultires = { ...target.multires, mode };
+      const res = await evaluateMultiresLevelAsync(nextMultires, nextMultires.currentLevel, {
+        shading: target.shading,
+      });
+      if (res.status !== 'completed') return;
+      pushHistory(makeSnapshot());
+      const serialized = res.result.toJSON();
+      setProject((p) =>
+        updateActiveScene(p, (scene) => ({
+          ...scene,
+          objects: scene.objects.map((o) =>
+            o.id === objectId ? { ...o, mesh: serialized, multires: nextMultires } : o,
+          ),
+        })),
+      );
+      setHasUnsavedChanges(true);
+      setMeshRevision((r) => r + 1);
+    },
+    [activeObjects, makeSnapshot, pushHistory],
+  );
+
+  const deleteMultiresHigherLevels = useCallback(
+    (objectId: string) => {
+      const target = activeObjects.find((o) => o.id === objectId);
+      if (!target || !target.multires) return;
+      if (target.multires.currentLevel >= target.multires.maxLevel) return;
+      pushHistory(makeSnapshot());
+      const pruned = pruneMultiresHigherLevels(target.multires);
+      setProject((p) =>
+        updateActiveScene(p, (scene) => ({
+          ...scene,
+          objects: scene.objects.map((o) =>
+            o.id === objectId ? { ...o, multires: pruned } : o,
+          ),
+        })),
+      );
+      setHasUnsavedChanges(true);
+      showToast(`Niveles superiores eliminados (máx. ahora Nivel ${pruned.maxLevel})`);
+    },
+    [activeObjects, makeSnapshot, pushHistory, showToast],
+  );
+
+  const applyMultires = useCallback(
+    async (objectId: string) => {
+      const target = activeObjects.find((o) => o.id === objectId);
+      if (!target || !target.multires) return;
+      if (target.locked) {
+        showToast('Desbloquea el objeto antes de aplicar Multiresolución');
+        return;
+      }
+      let finalSerialized = target.mesh;
+      if (target.multires.currentLevel < target.multires.maxLevel) {
+        const res = await evaluateMultiresLevelAsync(
+          target.multires,
+          target.multires.maxLevel,
+          { shading: target.shading },
+        );
+        if (res.status !== 'completed') return;
+        finalSerialized = res.result.toJSON();
+      }
+      pushHistory(makeSnapshot());
+      markTimelapseOp('multires_apply', `Aplicar Multiresolución (${target.name})`);
+      setProject((p) =>
+        updateActiveScene(p, (scene) => ({
+          ...scene,
+          objects: scene.objects.map((o) =>
+            o.id === objectId ? { ...o, mesh: finalSerialized, multires: undefined } : o,
+          ),
+        })),
+      );
+      setHasUnsavedChanges(true);
+      setMeshRevision((r) => r + 1);
+      showToast('Multiresolución aplicada a la malla base');
+    },
+    [activeObjects, makeSnapshot, markTimelapseOp, pushHistory, showToast],
+  );
+
+  const runObjectVoxelRemesh = useCallback(
+    async (
+      objectId: string,
+      voxelSize: number,
+      forceConfirm = false,
+    ): Promise<{
+      ok: boolean;
+      requiresConfirmation?: boolean;
+      estimate?: GeometryOperationResourceEstimate;
+      error?: string;
+    }> => {
+      const target = activeObjects.find((o) => o.id === objectId);
+      if (!target || target.objectType !== 'mesh') {
+        return { ok: false, error: 'Selecciona un objeto de malla válido.' };
+      }
+      if (target.locked) {
+        showToast('Desbloquea el objeto antes de ejecutar Voxel Remesh');
+        return { ok: false, error: 'Objeto bloqueado' };
+      }
+
+      const sourceMesh = EditableMesh.fromJSON(target.mesh);
+      const voxelEst = estimateVoxelRemeshStats(sourceMesh, voxelSize);
+      const estimate = estimateGeometryOperationResources({
+        operation: 'voxel_remesh',
+        currentVertices: sourceMesh.vertices.length,
+        currentFaces: sourceMesh.faces.length,
+        estimatedTargetVertices: voxelEst.estimatedVertices,
+        estimatedTargetFaces: voxelEst.estimatedFaces,
+        sceneObjects: activeObjects,
+        limits: settings.geometryLimits,
+      });
+
+      if (!estimate.canProceed) {
+        setLastGeometryWarning(estimate.message);
+        showToast(estimate.message);
+        return { ok: false, estimate, error: estimate.message };
+      }
+      if (estimate.requiresConfirmation && !forceConfirm) {
+        setLastGeometryWarning(estimate.message);
+        return { ok: false, requiresConfirmation: true, estimate };
+      }
+
+      let lock;
+      try {
+        lock = globalGeometryLockManager.acquire(objectId, 'Voxel Remesh');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Operación en curso';
+        showToast(msg);
+        return { ok: false, error: msg };
+      }
+
+      setActiveGeometryTask({
+        objectId,
+        label: 'Voxel Remesh',
+        progress: 0.04,
+        stage: 'Preparando rejilla volumétrica…',
+        cancel: () => globalGeometryLockManager.cancel(objectId),
+      });
+
+      try {
+        const res = await runVoxelRemeshAsync(sourceMesh, {
+          voxelSize: voxelEst.clampedVoxelSize,
+          preserveMaterialId: target.materialId,
+          signal: lock.abortController.signal,
+          onProgress: (ratio, stage) => {
+            globalGeometryLockManager.updateProgress(objectId, lock.taskId, ratio, stage);
+            setActiveGeometryTask((prev) =>
+              prev && prev.objectId === objectId
+                ? { ...prev, progress: ratio, stage }
+                : prev,
+            );
+          },
+        });
+
+        if (res.status === 'cancelled') {
+          showToast('Voxel Remesh cancelado — topología original intacta');
+          return { ok: false, error: 'Cancelado' };
+        }
+        if (res.status === 'error') {
+          showToast(res.error);
+          return { ok: false, error: res.error };
+        }
+
+        const remeshed = res.result;
+        pushHistory(makeSnapshot());
+        markTimelapseOp('voxel_remesh', `Voxel Remesh (${target.name})`);
+        const serialized = remeshed.toJSON();
+        setProject((p) =>
+          updateActiveScene(p, (scene) => ({
+            ...scene,
+            objects: scene.objects.map((o) =>
+              o.id === objectId
+                ? { ...o, mesh: serialized, multires: undefined }
+                : o,
+            ),
+          })),
+        );
+        savedEditSelectionsRef.current.delete(objectId);
+        if (workMode === 'edit' && selectedObjectId === objectId) {
+          setSelectedComponentIds(new Set());
+        }
+        setHasUnsavedChanges(true);
+        setMeshRevision((r) => r + 1);
+        showToast(
+          `Voxel Remesh listo (${remeshed.faces.length.toLocaleString()} caras)`,
+        );
+        return { ok: true, estimate };
+      } finally {
+        globalGeometryLockManager.release(objectId, lock.taskId);
+        setActiveGeometryTask((prev) => (prev?.objectId === objectId ? null : prev));
+      }
+    },
+    [
+      activeObjects,
+      makeSnapshot,
+      markTimelapseOp,
+      pushHistory,
+      selectedObjectId,
+      settings.geometryLimits,
+      showToast,
+      workMode,
+    ],
+  );
+
+  const adaptiveGeometryBudgets = useMemo(
+    () =>
+      computeAdaptiveBudgets(
+        probeRuntimeDeviceCapabilities(),
+        settings.geometryLimits ?? {
+          maxMemoryBudgetMB: 'auto',
+          maxFacesPerObject: 'auto',
+          autoViewportLod: true,
+          warnThresholdRatio: 0.72,
+        },
+      ),
+    [settings.geometryLimits],
+  );
+
+  /* ==========================================================================
    * Advanced Edit Mode Operators (v0.2)
    * ======================================================================== */
   const startEditOperator = useCallback(
@@ -5728,9 +6302,25 @@ export function useModelerStore() {
     setProject((p) =>
       updateActiveScene(p, (scene) => ({
         ...scene,
-        objects: scene.objects.map((o) =>
-          o.id === operatorSession.objectId ? { ...o, mesh: serialized } : o,
-        ),
+        objects: scene.objects.map((o) => {
+          if (o.id !== operatorSession.objectId) return o;
+          let nextMultires = o.multires;
+          if (nextMultires) {
+            if (
+              o.mesh.vertices.length === finalMesh.vertices.length &&
+              o.mesh.faces.length === finalMesh.faces.length
+            ) {
+              nextMultires = commitMeshChangesToMultires(
+                nextMultires,
+                finalMesh,
+                nextMultires.currentLevel,
+              );
+            } else {
+              nextMultires = undefined;
+            }
+          }
+          return { ...o, mesh: serialized, multires: nextMultires };
+        }),
       })),
     );
     setEditSelectionMode(nextMode);
@@ -6485,6 +7075,19 @@ export function useModelerStore() {
     setSculptBrush,
     updateSculptSettings,
     commitSculptStroke,
+    activeGeometryTask,
+    lastGeometryWarning,
+    adaptiveGeometryBudgets,
+    cancelActiveGeometryTask,
+    purgeGeometryCachesAction,
+    addMultiresLevel,
+    setMultiresLevel,
+    setMultiresViewportLevel,
+    toggleMultiresAutoLod,
+    setMultiresMode,
+    deleteMultiresHigherLevels,
+    applyMultires,
+    runObjectVoxelRemesh,
     cursor3D,
     selectedComponentIds: renderedSelectedComponentIds,
     selectedModifierDiagnostics,

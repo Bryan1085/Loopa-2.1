@@ -5,6 +5,16 @@ import type {
   MaterialNodeType,
   MaterialNodeValue,
 } from "../project/types";
+import {
+  evaluateNoiseSample,
+  evaluateVoronoiSample,
+  NoiseTextureParams,
+  ProceduralDimensions,
+  rgbaToPngDataUrl,
+  VoronoiDistanceMetric,
+  VoronoiFeature,
+  VoronoiTextureParams,
+} from "./proceduralTextures";
 
 export type MaterialSocketType =
   "float" | "integer" | "boolean" | "color" | "vector" | "geometry" | "shader" | "material";
@@ -62,6 +72,45 @@ export const MATERIAL_NODE_DEFINITIONS: MaterialNodeDefinition[] = [
     category: "texture",
     inputs: [socket("vector", "Vector", "vector")],
     outputs: [socket("color", "Color", "color"), socket("alpha", "Alpha", "float")],
+  },
+  {
+    id: "noise_texture",
+    label: "Noise Texture",
+    category: "texture",
+    inputs: [
+      socket("vector", "Vector", "vector"),
+      socket("w", "W", "float"),
+      socket("scale", "Scale", "float"),
+      socket("detail", "Detail", "float"),
+      socket("roughness", "Roughness", "float"),
+      socket("lacunarity", "Lacunarity", "float"),
+      socket("offset", "Offset", "float"),
+      socket("distortion", "Distortion", "float"),
+    ],
+    outputs: [socket("factor", "Fac", "float"), socket("color", "Color", "color")],
+  },
+  {
+    id: "voronoi_texture",
+    label: "Voronoi Texture",
+    category: "texture",
+    inputs: [
+      socket("vector", "Vector", "vector"),
+      socket("w", "W", "float"),
+      socket("scale", "Scale", "float"),
+      socket("detail", "Detail", "float"),
+      socket("roughness", "Roughness", "float"),
+      socket("lacunarity", "Lacunarity", "float"),
+      socket("smoothness", "Smoothness", "float"),
+      socket("exponent", "Exponent", "float"),
+      socket("randomness", "Randomness", "float"),
+    ],
+    outputs: [
+      socket("distance", "Distance", "float"),
+      socket("color", "Color", "color"),
+      socket("position", "Position", "vector"),
+      socket("w", "W", "float"),
+      socket("radius", "Radius", "float"),
+    ],
   },
   {
     id: "texture_coordinate",
@@ -268,6 +317,8 @@ export interface EvaluatedMaterialSurface {
   bumpTextureUrl?: string;
   bumpTextureTransform?: EvaluatedMaterialSurface["textureTransform"];
   bumpScale?: number;
+  roughnessTextureUrl?: string;
+  metallicTextureUrl?: string;
   metallic: number;
   roughness: number;
   opacity: number;
@@ -421,6 +472,7 @@ export function normalizeMaterialNodeGraph(
       id: candidate.id,
       type: candidate.type as MaterialNodeType,
       position: { x, y },
+      ...(candidate.collapsed ? { collapsed: true } : {}),
       values,
     });
     seenIds.add(candidate.id);
@@ -889,6 +941,65 @@ function evaluateRamp(node: MaterialNode, factor: number): { color: string; alph
   };
 }
 
+const PROCEDURAL_TEXTURE_SIZE = 96;
+const proceduralBakeCache = new Map<string, string>();
+
+function setCachedProceduralBake(key: string, dataUrl: string): void {
+  if (proceduralBakeCache.has(key)) {
+    proceduralBakeCache.delete(key);
+  } else if (proceduralBakeCache.size >= 48) {
+    const oldestKey = proceduralBakeCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      proceduralBakeCache.delete(oldestKey);
+    }
+  }
+  proceduralBakeCache.set(key, dataUrl);
+}
+
+function readDimensions(value: unknown): ProceduralDimensions {
+  return value === "1D" || value === "2D" || value === "3D" || value === "4D" ? value : "3D";
+}
+
+function readVoronoiFeature(value: unknown): VoronoiFeature {
+  return value === "f1" ||
+    value === "f2" ||
+    value === "smooth_f1" ||
+    value === "distance_to_edge" ||
+    value === "n_sphere_radius"
+    ? value
+    : "f1";
+}
+
+function readVoronoiMetric(value: unknown): VoronoiDistanceMetric {
+  return value === "euclidean" ||
+    value === "manhattan" ||
+    value === "chebychev" ||
+    value === "minkowski"
+    ? value
+    : "euclidean";
+}
+
+function applyUvMappingTransform(
+  coord: [number, number, number],
+  location: [number, number, number],
+  rotation: [number, number, number],
+  scale: [number, number, number],
+): [number, number, number] {
+  let x = coord[0] * scale[0];
+  let y = coord[1] * scale[1];
+  let z = coord[2] * scale[2];
+  const [rx, ry, rz] = rotation;
+  const nextY = y * Math.cos(rx) - z * Math.sin(rx);
+  let nextZ = y * Math.sin(rx) + z * Math.cos(rx);
+  const nextX = x * Math.cos(ry) + nextZ * Math.sin(ry);
+  nextZ = -x * Math.sin(ry) + nextZ * Math.cos(ry);
+  x = nextX * Math.cos(rz) - nextY * Math.sin(rz);
+  y = nextX * Math.sin(rz) + nextY * Math.cos(rz);
+  z = nextZ;
+  return [x + location[0], y + location[1], z + location[2]];
+}
+
+
 export function evaluateMaterialNodeGraph(
   graph: MaterialNodeGraph,
   fallback: Pick<
@@ -936,13 +1047,305 @@ export function evaluateMaterialNodeGraph(
   }
 
   const unsupportedNodes = new Set<string>();
-  const inputValue = (node: MaterialNode, socketId: string): unknown => {
-    const link = graph.links.find(
-      (candidate) => candidate.toNodeId === node.id && candidate.toSocket === socketId,
+  const findLink = (nodeId: string, socketId: string) =>
+    graph.links.find((candidate) => candidate.toNodeId === nodeId && candidate.toSocket === socketId);
+
+  const subtreeHasProceduralSource = (
+    node: MaterialNode,
+    socketId: string,
+    visited = new Set<string>(),
+  ): boolean => {
+    const visitKey = `${node.id}:${socketId}`;
+    if (visited.has(visitKey)) return false;
+    visited.add(visitKey);
+    const link = findLink(node.id, socketId);
+    if (!link) return false;
+    const source = nodes.get(link.fromNodeId);
+    if (!source) return false;
+    if (source.type === "noise_texture" || source.type === "voronoi_texture") {
+      return true;
+    }
+    const def = getMaterialNodeDefinition(source.type);
+    return def.inputs.some((input) => subtreeHasProceduralSource(source, input.id, visited));
+  };
+
+  const getNoiseParamsAtCoord = (
+    source: MaterialNode,
+    coord: [number, number, number],
+  ): NoiseTextureParams => ({
+    dimensions: readDimensions(source.values.dimensions),
+    w: evalScalarAtCoord(source, "w", 0, coord),
+    scale: evalScalarAtCoord(source, "scale", 5, coord),
+    detail: evalScalarAtCoord(source, "detail", 2, coord),
+    roughness: evalScalarAtCoord(source, "roughness", 0.5, coord),
+    lacunarity: evalScalarAtCoord(source, "lacunarity", 2, coord),
+    offset: evalScalarAtCoord(source, "offset", 0, coord),
+    distortion: evalScalarAtCoord(source, "distortion", 0, coord),
+    normalize: source.values.normalize !== false,
+  });
+
+  const getVoronoiParamsAtCoord = (
+    source: MaterialNode,
+    coord: [number, number, number],
+  ): VoronoiTextureParams => ({
+    dimensions: readDimensions(source.values.dimensions),
+    feature: readVoronoiFeature(source.values.feature),
+    distanceMetric: readVoronoiMetric(source.values.distanceMetric),
+    w: evalScalarAtCoord(source, "w", 0, coord),
+    scale: evalScalarAtCoord(source, "scale", 5, coord),
+    detail: evalScalarAtCoord(source, "detail", 0, coord),
+    roughness: evalScalarAtCoord(source, "roughness", 0.5, coord),
+    lacunarity: evalScalarAtCoord(source, "lacunarity", 2, coord),
+    smoothness: evalScalarAtCoord(source, "smoothness", 1, coord),
+    exponent: evalScalarAtCoord(source, "exponent", 0.5, coord),
+    randomness: evalScalarAtCoord(source, "randomness", 1, coord),
+    normalize: Boolean(source.values.normalize),
+  });
+
+  const evalVectorAtCoord = (
+    node: MaterialNode,
+    socketId: string,
+    defaultVec: [number, number, number],
+    coord: [number, number, number],
+  ): [number, number, number] => {
+    const link = findLink(node.id, socketId);
+    if (!link) return asVector3(node.values[socketId], defaultVec);
+    const source = nodes.get(link.fromNodeId);
+    if (!source) return defaultVec;
+
+    if (source.type === "texture_coordinate") {
+      if (link.fromSocket === "generated") {
+        return [coord[0], coord[1], 0.5];
+      }
+      return [coord[0], coord[1], 0];
+    }
+    if (source.type === "mapping") {
+      const baseVec = evalVectorAtCoord(source, "vector", coord, coord);
+      const location = asVector3(source.values.location, [0, 0, 0]);
+      const rotation = asVector3(source.values.rotation, [0, 0, 0]);
+      const scale = asVector3(source.values.scale, [1, 1, 1]);
+      return applyUvMappingTransform(baseVec, location, rotation, scale);
+    }
+    if (source.type === "transform") {
+      const baseVec = evalVectorAtCoord(source, "vector", coord, coord);
+      const location = asVector3(source.values.location, [0, 0, 0]);
+      const rotationDeg = asVector3(source.values.rotation, [0, 0, 0]);
+      const rotation = rotationDeg.map((deg) => (deg * Math.PI) / 180) as [number, number, number];
+      const scale = asVector3(source.values.scale, [1, 1, 1]);
+      return applyUvMappingTransform(baseVec, location, rotation, scale);
+    }
+    if (source.type === "mix_vector") {
+      return evaluateVectorMix(
+        source.values.operation,
+        evalScalarAtCoord(source, "factor", 0.5, coord),
+        evalVectorAtCoord(source, "a", [0, 0, 0], coord),
+        evalVectorAtCoord(source, "b", [1, 1, 1], coord),
+      );
+    }
+    if (source.type === "value_vector") {
+      return asVector3(source.values.value, defaultVec);
+    }
+    if (source.type === "voronoi_texture" && link.fromSocket === "position") {
+      const sampleVec = evalVectorAtCoord(source, "vector", coord, coord);
+      return evaluateVoronoiSample(getVoronoiParamsAtCoord(source, coord), sampleVec).position;
+    }
+    return defaultVec;
+  };
+
+  const evalColorRgbAtCoord = (
+    node: MaterialNode,
+    socketId: string,
+    defaultColor: [number, number, number],
+    coord: [number, number, number],
+  ): [number, number, number] => {
+    const link = findLink(node.id, socketId);
+    if (!link) return parseHexColor(node.values[socketId] ?? formatHexColor(defaultColor));
+    const source = nodes.get(link.fromNodeId);
+    if (!source) return defaultColor;
+
+    if (source.type === "noise_texture") {
+      const sampleVec = evalVectorAtCoord(source, "vector", coord, coord);
+      const res = evaluateNoiseSample(getNoiseParamsAtCoord(source, coord), sampleVec);
+      if (link.fromSocket === "color") return res.color;
+      return [res.factor, res.factor, res.factor];
+    }
+    if (source.type === "voronoi_texture") {
+      const sampleVec = evalVectorAtCoord(source, "vector", coord, coord);
+      const res = evaluateVoronoiSample(getVoronoiParamsAtCoord(source, coord), sampleVec);
+      if (link.fromSocket === "color") return res.color;
+      if (link.fromSocket === "position") return res.position;
+      const scalar =
+        link.fromSocket === "radius" ? res.radius : link.fromSocket === "w" ? res.w : res.distance;
+      return [scalar, scalar, scalar];
+    }
+    if (source.type === "color_ramp") {
+      const factor = Math.max(0, Math.min(1, evalScalarAtCoord(source, "factor", 0.5, coord)));
+      const result = evaluateRamp(source, factor);
+      if (link.fromSocket === "alpha") {
+        return [result.alpha, result.alpha, result.alpha];
+      }
+      return parseHexColor(result.color);
+    }
+    if (source.type === "mix_color") {
+      const factor = Math.max(0, Math.min(1, evalScalarAtCoord(source, "factor", 0.5, coord)));
+      const cA = evalColorRgbAtCoord(source, "colorA", [0, 0, 0], coord);
+      const cB = evalColorRgbAtCoord(source, "colorB", [1, 1, 1], coord);
+      return parseHexColor(evaluateColorMix(source.values.operation, factor, cA, cB));
+    }
+    if (source.type === "value_color") {
+      return parseHexColor(source.values.value);
+    }
+    const scalar = evalScalarAtCoord(node, socketId, 0.5, coord);
+    return [scalar, scalar, scalar];
+  };
+
+  const evalScalarAtCoord = (
+    node: MaterialNode,
+    socketId: string,
+    defaultValue: number,
+    coord: [number, number, number],
+  ): number => {
+    const link = findLink(node.id, socketId);
+    if (!link) return asNumber(node.values[socketId], defaultValue);
+    const source = nodes.get(link.fromNodeId);
+    if (!source) return defaultValue;
+
+    if (source.type === "noise_texture") {
+      const sampleVec = evalVectorAtCoord(source, "vector", coord, coord);
+      const res = evaluateNoiseSample(getNoiseParamsAtCoord(source, coord), sampleVec);
+      if (link.fromSocket === "color") {
+        return (res.color[0] + res.color[1] + res.color[2]) / 3;
+      }
+      return res.factor;
+    }
+    if (source.type === "voronoi_texture") {
+      const sampleVec = evalVectorAtCoord(source, "vector", coord, coord);
+      const res = evaluateVoronoiSample(getVoronoiParamsAtCoord(source, coord), sampleVec);
+      if (link.fromSocket === "color") {
+        return (res.color[0] + res.color[1] + res.color[2]) / 3;
+      }
+      if (link.fromSocket === "position") {
+        return (res.position[0] + res.position[1] + res.position[2]) / 3;
+      }
+      if (link.fromSocket === "w") return res.w;
+      if (link.fromSocket === "radius") return res.radius;
+      return res.distance;
+    }
+    if (source.type === "math") {
+      return evaluateMath(
+        source.values.operation,
+        evalScalarAtCoord(source, "a", 0, coord),
+        evalScalarAtCoord(source, "b", 0, coord),
+      );
+    }
+    if (source.type === "mix_float") {
+      return evaluateScalarMix(
+        source.values.operation,
+        evalScalarAtCoord(source, "factor", 0.5, coord),
+        evalScalarAtCoord(source, "a", 0, coord),
+        evalScalarAtCoord(source, "b", 0, coord),
+      );
+    }
+    if (source.type === "color_ramp") {
+      const factor = Math.max(0, Math.min(1, evalScalarAtCoord(source, "factor", 0.5, coord)));
+      const ramp = evaluateRamp(source, factor);
+      if (link.fromSocket === "alpha") return ramp.alpha;
+      const rgb = parseHexColor(ramp.color);
+      return (rgb[0] + rgb[1] + rgb[2]) / 3;
+    }
+    if (
+      source.type === "value_float" ||
+      source.type === "value_integer" ||
+      source.type === "value_boolean"
+    ) {
+      return asNumber(source.values.value, defaultValue);
+    }
+    if (source.type === "mix_color") {
+      const rgb = evalColorRgbAtCoord(node, socketId, [defaultValue, defaultValue, defaultValue], coord);
+      return (rgb[0] + rgb[1] + rgb[2]) / 3;
+    }
+    return defaultValue;
+  };
+
+  const serializeSubtreeKey = (
+    node: MaterialNode,
+    socketId: string,
+    visited = new Set<string>(),
+  ): string => {
+    const link = findLink(node.id, socketId);
+    if (!link) return `v:${JSON.stringify(node.values[socketId] ?? null)}`;
+    if (visited.has(link.id)) return "cycle";
+    visited.add(link.id);
+    const source = nodes.get(link.fromNodeId);
+    if (!source) return "missing";
+    const def = getMaterialNodeDefinition(source.type);
+    const inputKeys = def.inputs.map(
+      (input) => `${input.id}=${serializeSubtreeKey(source, input.id, new Set(visited))}`,
     );
+    return `${source.type}:${link.fromSocket}:${JSON.stringify(source.values)}:(${inputKeys.join(",")})`;
+  };
+
+  const bakeProceduralSubtree = (
+    node: MaterialNode,
+    socketId: string,
+    mode: "color" | "scalar",
+  ): string => {
+    const cacheKey = `${mode}|${serializeSubtreeKey(node, socketId)}`;
+    const cached = proceduralBakeCache.get(cacheKey);
+    if (cached) return cached;
+
+    const size = PROCEDURAL_TEXTURE_SIZE;
+    const rgba = new Uint8ClampedArray(size * size * 4);
+    for (let py = 0; py < size; py += 1) {
+      const v = 1 - (py + 0.5) / size;
+      for (let px = 0; px < size; px += 1) {
+        const u = (px + 0.5) / size;
+        const idx = (py * size + px) * 4;
+        if (mode === "color") {
+          const [r, g, b] = evalColorRgbAtCoord(node, socketId, [0.5, 0.5, 0.5], [u, v, 0]);
+          rgba[idx] = Math.round(Math.max(0, Math.min(1, r)) * 255);
+          rgba[idx + 1] = Math.round(Math.max(0, Math.min(1, g)) * 255);
+          rgba[idx + 2] = Math.round(Math.max(0, Math.min(1, b)) * 255);
+          rgba[idx + 3] = 255;
+        } else {
+          const val = Math.max(0, Math.min(1, evalScalarAtCoord(node, socketId, 0.5, [u, v, 0])));
+          const byte = Math.round(val * 255);
+          rgba[idx] = byte;
+          rgba[idx + 1] = byte;
+          rgba[idx + 2] = byte;
+          rgba[idx + 3] = 255;
+        }
+      }
+    }
+    const url = rgbaToPngDataUrl(size, size, rgba);
+    setCachedProceduralBake(cacheKey, url);
+    return url;
+  };
+
+  const inputValue = (node: MaterialNode, socketId: string): unknown => {
+    const link = findLink(node.id, socketId);
     if (!link) return node.values[socketId];
     const source = nodes.get(link.fromNodeId);
     if (!source) return undefined;
+    if (subtreeHasProceduralSource(node, socketId)) {
+      const sampleCoord: [number, number, number] = [0.5, 0.5, 0];
+      if (
+        source.type === "noise_texture" ||
+        source.type === "voronoi_texture" ||
+        source.type === "color_ramp" ||
+        source.type === "mix_color" ||
+        source.type === "math" ||
+        source.type === "mix_float"
+      ) {
+        if (
+          link.fromSocket === "color" ||
+          (source.type === "mix_color" && link.fromSocket === "color")
+        ) {
+          return formatHexColor(evalColorRgbAtCoord(node, socketId, [0.5, 0.5, 0.5], sampleCoord));
+        }
+        return evalScalarAtCoord(node, socketId, 0.5, sampleCoord);
+      }
+    }
     if (source.type === "math" && link.fromSocket === "value") {
       return evaluateMath(
         source.values.operation,
@@ -1020,11 +1423,11 @@ export function evaluateMaterialNodeGraph(
       };
     }
     if (source.type === "texture_coordinate") {
-      if (link.fromSocket !== "uv") {
+      if (link.fromSocket !== "uv" && link.fromSocket !== "generated") {
         unsupportedNodes.add(source.id);
         return undefined;
       }
-      return { kind: "uv" };
+      return { kind: "uv", coordType: link.fromSocket };
     }
     if (source.type === "mapping") {
       const inputVector = inputValue(source, "vector");
@@ -1048,6 +1451,15 @@ export function evaluateMaterialNodeGraph(
       return transformVector(vector, source);
     }
     if (source.type === "normal_map" && link.fromSocket === "normal") {
+      if (subtreeHasProceduralSource(source, "color")) {
+        return {
+          kind: "normal_map",
+          dataUrl: bakeProceduralSubtree(source, "color", "color"),
+          textureName: "Procedural Normal",
+          transform: undefined,
+          strength: Math.max(0, scalarInput(source, "strength", 1)),
+        };
+      }
       const color = inputValue(source, "color");
       if (!isRecord(color) || color.kind !== "image_texture") {
         unsupportedNodes.add(source.id);
@@ -1062,16 +1474,24 @@ export function evaluateMaterialNodeGraph(
       };
     }
     if (source.type === "bump" && link.fromSocket === "normal") {
-      const height = inputValue(source, "height");
-      if (!isRecord(height) || height.kind !== "image_alpha") {
-        unsupportedNodes.add(source.id);
-        return undefined;
-      }
       if (
         graph.links.some(
           (candidate) => candidate.toNodeId === source.id && candidate.toSocket === "normal",
         )
       ) {
+        unsupportedNodes.add(source.id);
+        return undefined;
+      }
+      if (subtreeHasProceduralSource(source, "height")) {
+        return {
+          kind: "bump_map",
+          dataUrl: bakeProceduralSubtree(source, "height", "scalar"),
+          transform: undefined,
+          scale: Math.max(0, scalarInput(source, "strength", 1)) * scalarInput(source, "distance", 1),
+        };
+      }
+      const height = inputValue(source, "height");
+      if (!isRecord(height) || height.kind !== "image_alpha") {
         unsupportedNodes.add(source.id);
         return undefined;
       }
@@ -1098,12 +1518,25 @@ export function evaluateMaterialNodeGraph(
     return asNumber(value, defaultValue);
   };
 
+  const baseColorIsProcedural = subtreeHasProceduralSource(principled, "baseColor");
+  const roughnessIsProcedural = subtreeHasProceduralSource(principled, "roughness");
+  const metallicIsProcedural = subtreeHasProceduralSource(principled, "metallic");
+
   const baseColorValue = inputValue(principled, "baseColor");
   const emissionValue = inputValue(principled, "emission");
   const baseColorTexture =
     isRecord(baseColorValue) && baseColorValue.kind === "image_texture"
       ? baseColorValue
       : undefined;
+  const proceduralBaseColorUrl = baseColorIsProcedural
+    ? bakeProceduralSubtree(principled, "baseColor", "color")
+    : undefined;
+  const proceduralRoughnessUrl = roughnessIsProcedural
+    ? bakeProceduralSubtree(principled, "roughness", "scalar")
+    : undefined;
+  const proceduralMetallicUrl = metallicIsProcedural
+    ? bakeProceduralSubtree(principled, "metallic", "scalar")
+    : undefined;
   const mappedTransform =
     baseColorTexture && isRecord(baseColorTexture.transform)
       ? baseColorTexture.transform
@@ -1157,11 +1590,15 @@ export function evaluateMaterialNodeGraph(
     surface: {
       baseColor,
       baseColorTextureUrl:
-        typeof baseColorTexture?.dataUrl === "string" ? baseColorTexture.dataUrl : undefined,
+        typeof baseColorTexture?.dataUrl === "string"
+          ? baseColorTexture.dataUrl
+          : proceduralBaseColorUrl,
       textureName:
         typeof baseColorTexture?.textureName === "string"
           ? baseColorTexture.textureName
-          : undefined,
+          : proceduralBaseColorUrl
+            ? "Procedural Texture"
+            : undefined,
       textureTransform:
         mappedTransform?.kind === "mapped_uv"
           ? {
@@ -1178,6 +1615,8 @@ export function evaluateMaterialNodeGraph(
       bumpTextureUrl: typeof bumpTexture?.dataUrl === "string" ? bumpTexture.dataUrl : undefined,
       bumpTextureTransform: mapTransform(bumpTexture),
       bumpScale: typeof bumpTexture?.scale === "number" ? bumpTexture.scale : undefined,
+      roughnessTextureUrl: proceduralRoughnessUrl,
+      metallicTextureUrl: proceduralMetallicUrl,
       metallic: clamp(
         scalarInput(principled, "metallic", fallbackSurface.metallic),
         fallbackSurface.metallic,

@@ -42,6 +42,10 @@ import {
   ProportionalEditingSettings,
 } from '../core/mesh/proportionalEditing';
 import {
+  AdaptiveResourceBudgets,
+  DEFAULT_GEOMETRY_RESOURCE_LIMITS,
+} from '../core/mesh/resourceManager';
+import {
   RADIAL_ACTION_MAP,
   RadialActionId,
   RadialLayoutScope,
@@ -95,6 +99,8 @@ interface SettingsModalProps {
   ) => void;
   onResetToolConfig: (target: ToolResetTarget) => void;
   onResetAllToolConfigs: () => void;
+  adaptiveGeometryBudgets?: AdaptiveResourceBudgets;
+  onPurgeGeometryCaches?: () => void;
   onClose: () => void;
 }
 
@@ -192,6 +198,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onUpdateProportionalSettings,
   onResetToolConfig,
   onResetAllToolConfigs,
+  adaptiveGeometryBudgets,
+  onPurgeGeometryCaches,
   onClose,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
@@ -1444,6 +1452,115 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   )}
                 </div>
               </div>
+
+              {/* Límites de Geometría y Memoria (Esculpido de Alta Densidad) */}
+              {(() => {
+                const limits = settings.geometryLimits ?? DEFAULT_GEOMETRY_RESOURCE_LIMITS;
+                return (
+                  <div
+                    data-testid="geometry-limits-card"
+                    className="rounded-lg bg-[#15171c] border border-[#2b2e36] p-3 space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-semibold text-[#eceef2]">
+                          Límites de Geometría y Memoria (Esculpido)
+                        </div>
+                        {adaptiveGeometryBudgets && (
+                          <div className="text-[10px] text-[#8e95a2]">
+                            Presupuesto actual: {adaptiveGeometryBudgets.budgetMB} MB · Máx. recomendado{' '}
+                            {adaptiveGeometryBudgets.recommendedMaxFaces.toLocaleString()} caras
+                          </div>
+                        )}
+                      </div>
+                      {onPurgeGeometryCaches && (
+                        <button
+                          type="button"
+                          data-testid="purge-geometry-caches-btn"
+                          onClick={onPurgeGeometryCaches}
+                          className="h-7 px-2.5 rounded bg-[#22252d] hover:bg-[#2b303a] border border-[#343a47] text-[11px] font-semibold text-[#38bdf8] transition-colors shrink-0"
+                        >
+                          Liberar cachés
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <label className="space-y-1">
+                        <span className="block text-[11px] text-[#cbd5e1]">
+                          Presupuesto de memoria
+                        </span>
+                        <select
+                          value={String(limits.maxMemoryBudgetMB)}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            onUpdateSettings({
+                              geometryLimits: {
+                                ...limits,
+                                maxMemoryBudgetMB: val === 'auto' ? 'auto' : Number(val),
+                              },
+                            });
+                          }}
+                          className="w-full h-9 px-2.5 rounded-md bg-[#111317] border border-[#2f333d] text-xs font-mono-tabular text-[#f3f4f6] outline-none"
+                        >
+                          <option value="auto">Automático (Adaptativo)</option>
+                          <option value="256">256 MB (Tablet ligero)</option>
+                          <option value="512">512 MB (Estándar)</option>
+                          <option value="1024">1024 MB (Alto)</option>
+                          <option value="2048">2048 MB (Desktop)</option>
+                        </select>
+                      </label>
+
+                      <label className="space-y-1">
+                        <span className="block text-[11px] text-[#cbd5e1]">
+                          Máx. polígonos por objeto
+                        </span>
+                        <select
+                          value={String(limits.maxFacesPerObject)}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            onUpdateSettings({
+                              geometryLimits: {
+                                ...limits,
+                                maxFacesPerObject: val === 'auto' ? 'auto' : Number(val),
+                              },
+                            });
+                          }}
+                          className="w-full h-9 px-2.5 rounded-md bg-[#111317] border border-[#2f333d] text-xs font-mono-tabular text-[#f3f4f6] outline-none"
+                        >
+                          <option value="auto">Automático (Hardware)</option>
+                          <option value="50000">50,000 caras</option>
+                          <option value="150000">150,000 caras</option>
+                          <option value="300000">300,000 caras</option>
+                          <option value="600000">600,000 caras</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-[#eceef2]">
+                          Auto-LOD de cámara en Multiresolución
+                        </div>
+                        <div className="text-[11px] text-[#8e95a2]">
+                          Reduce temporalmente la densidad al orbitar mallas muy pesadas y restaura al esculpir
+                        </div>
+                      </div>
+                      {renderSwitch(
+                        limits.autoViewportLod,
+                        () =>
+                          onUpdateSettings({
+                            geometryLimits: {
+                              ...limits,
+                              autoViewportLod: !limits.autoViewportLod,
+                            },
+                          }),
+                        'Auto-LOD de cámara en Multiresolución',
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="rounded-lg bg-[#15171c] border border-[#2b2e36] p-3 space-y-3">
                 <div className="flex items-center justify-between gap-2">

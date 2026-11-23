@@ -56,14 +56,23 @@ import {
   AxisConstraint,
   LightType,
   MoveSubMode,
+  MultiresSubdivisionMode,
+  SceneObjectData,
   SculptBrushType,
   SculptSettings,
   TouchControlSettings,
   TransformTool,
   WorkMode,
 } from '../core/project/types';
-import { SCULPT_BRUSH_DEFS } from '../core/mesh/sculptBrushes';
-import { EditOperatorType } from '../state/useModelerStore';
+import { DEFAULT_SCULPT_SETTINGS, SCULPT_BRUSH_DEFS } from '../core/mesh/sculptBrushes';
+import type {
+  AdaptiveResourceBudgets,
+  GeometryOperationResourceEstimate,
+} from '../core/mesh/resourceManager';
+import type {
+  ActiveGeometryTaskState,
+  EditOperatorType,
+} from '../state/useModelerStore';
 import { DeleteMenuPopover } from './DeleteMenuPopover';
 import { PrimitiveMenu } from './PrimitiveMenu';
 import { FalloffCurveIcon, ProportionalIcon } from './ProportionalIcons';
@@ -196,9 +205,34 @@ interface LeftToolSidebarProps {
   onAddPrimitive: (type: PrimitiveType, options?: PrimitiveOptions) => void;
   onAddLight?: (type: LightType) => void;
   sculptSettings: SculptSettings;
+  selectedMeshObject?: SceneObjectData | null;
+  activeGeometryTask?: ActiveGeometryTaskState | null;
+  adaptiveGeometryBudgets?: AdaptiveResourceBudgets;
+  onCancelGeometryTask?: () => void;
   onSelectSculptBrush: (brush: SculptBrushType) => void;
   onUpdateSculptSettings: (patch: Partial<SculptSettings>) => void;
   onSubdivideSelectedMeshForSculpt?: () => void;
+  onAddMultiresLevel?: (
+    objectId: string,
+    mode?: MultiresSubdivisionMode,
+    forceConfirm?: boolean,
+  ) => Promise<{
+    ok: boolean;
+    requiresConfirmation?: boolean;
+    estimate?: GeometryOperationResourceEstimate;
+    error?: string;
+  }>;
+  onSetMultiresLevel?: (objectId: string, level: number) => Promise<boolean>;
+  onRunVoxelRemesh?: (
+    objectId: string,
+    voxelSize: number,
+    forceConfirm?: boolean,
+  ) => Promise<{
+    ok: boolean;
+    requiresConfirmation?: boolean;
+    estimate?: GeometryOperationResourceEstimate;
+    error?: string;
+  }>;
   onDuplicateObject: () => void;
   onApplyObjectTransform: () => void;
   onCenterObjectOrigin: () => void;
@@ -375,9 +409,16 @@ export const LeftToolSidebar: React.FC<LeftToolSidebarProps> = ({
   onAddPrimitive,
   onAddLight,
   sculptSettings,
+  selectedMeshObject = null,
+  activeGeometryTask = null,
+  adaptiveGeometryBudgets,
+  onCancelGeometryTask,
   onSelectSculptBrush,
   onUpdateSculptSettings,
   onSubdivideSelectedMeshForSculpt,
+  onAddMultiresLevel,
+  onSetMultiresLevel,
+  onRunVoxelRemesh,
   onDuplicateObject,
   onApplyObjectTransform,
   onCenterObjectOrigin,
@@ -387,6 +428,10 @@ export const LeftToolSidebar: React.FC<LeftToolSidebarProps> = ({
 }) => {
   const [showPrimitivePopover, setShowPrimitivePopover] = useState(false);
   const [showDeletePopover, setShowDeletePopover] = useState(false);
+  const [voxelSize, setVoxelSize] = useState(0.08);
+  const [confirmVoxelWarning, setConfirmVoxelWarning] = useState(false);
+  const [pendingSculptMultiresConfirm, setPendingSculptMultiresConfirm] =
+    useState<GeometryOperationResourceEstimate | null>(null);
   const [activeDrag, setActiveDrag] = useState<ActiveDragState | null>(null);
   const [pendingDragId, setPendingDragId] = useState<SidebarModuleId | null>(null);
   const [compactTooltip, setCompactTooltip] = useState<CompactTooltipState | null>(null);
@@ -1803,21 +1848,344 @@ export const LeftToolSidebar: React.FC<LeftToolSidebarProps> = ({
             </div>
           )}
 
-          {/* Subdividir malla rápidamente para esculpir */}
-          {onSubdivideSelectedMeshForSculpt && (
-            <button
-              type="button"
-              data-testid="sculpt-subdivide-btn"
-              disabled={!canEditSelected}
-              onClick={onSubdivideSelectedMeshForSculpt}
-              aria-label="Subdividir malla para obtener mayor detalle de esculpido"
-              title="Subdividir malla para obtener mayor detalle de esculpido"
-              {...compactTipProps('Subdividir malla')}
-              className={buttonClass(false, !canEditSelected)}
+          {/* Progreso activo de subdivisión / remesh */}
+          {activeGeometryTask &&
+            selectedMeshObject &&
+            activeGeometryTask.objectId === selectedMeshObject.id && (
+              <div
+                data-testid="sculpt-geometry-progress"
+                className="rounded-lg bg-[#101319] border border-[#38bdf8]/55 p-2 space-y-1.5"
+              >
+                {!isCompact && (
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-[#7dd3fc] font-semibold truncate">
+                      {activeGeometryTask.stage || activeGeometryTask.label}
+                    </span>
+                    <span className="font-mono-tabular text-[#cbd5e1]">
+                      {Math.round(activeGeometryTask.progress * 100)}%
+                    </span>
+                  </div>
+                )}
+                <div className="h-1.5 w-full rounded bg-[#1e2430] overflow-hidden">
+                  <div
+                    className="h-full bg-[#38bdf8] transition-[width] duration-150"
+                    style={{
+                      width: `${Math.max(4, Math.min(100, activeGeometryTask.progress * 100))}%`,
+                    }}
+                  />
+                </div>
+                {onCancelGeometryTask && (
+                  <button
+                    type="button"
+                    data-testid="sculpt-cancel-task-btn"
+                    onClick={onCancelGeometryTask}
+                    className="w-full h-7 rounded bg-[#2c191c] hover:bg-[#3f2024] border border-[#ef4444]/60 text-[10px] font-semibold text-[#fca5a5]"
+                  >
+                    {isCompact ? 'Cancelar' : 'Cancelar operación'}
+                  </button>
+                )}
+              </div>
+            )}
+
+          {/* Confirmación de recursos altos para Multires */}
+          {!isCompact &&
+            pendingSculptMultiresConfirm &&
+            selectedMeshObject &&
+            onAddMultiresLevel && (
+              <div className="rounded-lg bg-[#2a1f14] border border-[#f59e0b]/60 p-2 space-y-1.5 text-[10px] text-[#fde68a]">
+                <p className="leading-snug">{pendingSculptMultiresConfirm.message}</p>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setPendingSculptMultiresConfirm(null)}
+                    className="flex-1 h-7 rounded bg-[#181b22] border border-[#343a48] text-[#cbd5e1] font-semibold"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const objId = selectedMeshObject.id;
+                      setPendingSculptMultiresConfirm(null);
+                      await onAddMultiresLevel(objId, undefined, true);
+                    }}
+                    className="flex-1 h-7 rounded bg-[#f59e0b] text-[#111317] font-bold"
+                  >
+                    Subdividir
+                  </button>
+                </div>
+              </div>
+            )}
+
+          {/* Multiresolución rápida para Esculpido */}
+          {(onAddMultiresLevel || onSubdivideSelectedMeshForSculpt) && (
+            <div className="rounded-lg bg-[#121419] border border-[#282c36] p-1.5 space-y-1.5">
+              {!isCompact && (
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="font-semibold text-[#8a93a4]">Multiresolución</span>
+                  <span className="font-mono-tabular font-bold text-[#fbbf24]">
+                    {selectedMeshObject?.multires
+                      ? `N${selectedMeshObject.multires.currentLevel}/${selectedMeshObject.multires.maxLevel}`
+                      : 'Base (N0)'}
+                  </span>
+                </div>
+              )}
+
+              {!isCompact && selectedMeshObject?.multires && onSetMultiresLevel && (
+                <div className="flex items-center justify-between gap-1 text-[10px]">
+                  <span className="text-[#9ca3af]">Nivel activo</span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={
+                        !canEditSelected ||
+                        Boolean(activeGeometryTask) ||
+                        selectedMeshObject.multires.currentLevel <= 0
+                      }
+                      onClick={() =>
+                        void onSetMultiresLevel(
+                          selectedMeshObject.id,
+                          selectedMeshObject.multires!.currentLevel - 1,
+                        )
+                      }
+                      className="w-6 h-6 rounded bg-[#1e2129] hover:bg-[#2a2f3a] disabled:opacity-35 text-xs font-bold text-white"
+                    >
+                      −
+                    </button>
+                    <span className="w-7 text-center font-mono-tabular text-[#fbbf24]">
+                      {selectedMeshObject.multires.currentLevel}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={
+                        !canEditSelected ||
+                        Boolean(activeGeometryTask) ||
+                        selectedMeshObject.multires.currentLevel >=
+                          selectedMeshObject.multires.maxLevel
+                      }
+                      onClick={() =>
+                        void onSetMultiresLevel(
+                          selectedMeshObject.id,
+                          selectedMeshObject.multires!.currentLevel + 1,
+                        )
+                      }
+                      className="w-6 h-6 rounded bg-[#1e2129] hover:bg-[#2a2f3a] disabled:opacity-35 text-xs font-bold text-white"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="button"
+                data-testid="sculpt-subdivide-btn"
+                disabled={!canEditSelected || Boolean(activeGeometryTask)}
+                onClick={() => {
+                  if (selectedMeshObject && onAddMultiresLevel) {
+                    void onAddMultiresLevel(selectedMeshObject.id).then((res) => {
+                      if (!res.ok && res.requiresConfirmation && res.estimate) {
+                        setPendingSculptMultiresConfirm(res.estimate);
+                      }
+                    });
+                  } else {
+                    onSubdivideSelectedMeshForSculpt?.();
+                  }
+                }}
+                aria-label="Añadir nivel de subdivisión Multiresolución para esculpido"
+                title="Añadir nivel de subdivisión Multiresolución"
+                {...compactTipProps('Subdividir Multires')}
+                className={buttonClass(
+                  false,
+                  !canEditSelected || Boolean(activeGeometryTask),
+                )}
+              >
+                <Grid className="w-4 h-4 shrink-0 text-[#5ecd6e]" />
+                {!isCompact && (
+                  <span className="truncate">+ Nivel Multires</span>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Topología Dinámica (Dyntopo) */}
+          {!isCompact && (
+            <div
+              data-testid="sculpt-dyntopo-card"
+              className="rounded-lg bg-[#121419] border border-[#282c36] p-1.5 space-y-1.5"
             >
-              <Grid className="w-4 h-4 shrink-0 text-[#5ecd6e]" />
-              {!isCompact && <span className="truncate">Subdividir malla</span>}
-            </button>
+              {(() => {
+                const dyn = sculptSettings.dyntopo ?? DEFAULT_SCULPT_SETTINGS.dyntopo!;
+                const currentFaces = selectedMeshObject?.mesh.faces.length ?? 0;
+                const hardLimit = adaptiveGeometryBudgets?.hardMaxFaces ?? 250000;
+                return (
+                  <>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-semibold text-[#8a93a4]">
+                        Dyntopo (Local)
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="sculpt-dyntopo-toggle"
+                        role="switch"
+                        aria-checked={dyn.enabled}
+                        onClick={() =>
+                          onUpdateSculptSettings({
+                            dyntopo: { ...dyn, enabled: !dyn.enabled },
+                          })
+                        }
+                        className={`px-2 h-6 rounded text-[10px] font-bold transition-colors ${
+                          dyn.enabled
+                            ? 'bg-[#19332b] border border-[#34d399]/70 text-[#6ee7b7]'
+                            : 'bg-[#1e2129] border border-[#2e3340] text-[#9ca3af]'
+                        }`}
+                      >
+                        {dyn.enabled ? 'Activo' : 'Off'}
+                      </button>
+                    </div>
+
+                    {dyn.enabled && (
+                      <div className="space-y-1.5 pt-1 border-t border-[#222630]">
+                        {selectedMeshObject?.multires && (
+                          <div className="text-[10px] text-[#fbbf24] leading-tight">
+                            Dyntopo modifica la topología base y descarta niveles Multires al aplicar el trazo.
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-[#9ca3af]">Tamaño detalle</span>
+                          <span className="font-mono-tabular text-[#34d399]">
+                            {dyn.detailSize.toFixed(2)}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.02}
+                          max={0.35}
+                          step={0.01}
+                          value={dyn.detailSize}
+                          onChange={(e) =>
+                            onUpdateSculptSettings({
+                              dyntopo: {
+                                ...dyn,
+                                detailSize: parseFloat(e.target.value),
+                              },
+                            })
+                          }
+                          className="w-full accent-[#34d399] cursor-pointer"
+                        />
+                        <div className="grid grid-cols-2 gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onUpdateSculptSettings({
+                                dyntopo: { ...dyn, subdivide: !dyn.subdivide },
+                              })
+                            }
+                            className={`h-6 rounded text-[10px] font-semibold border ${
+                              dyn.subdivide
+                                ? 'bg-[#19332b] border-[#34d399]/60 text-[#6ee7b7]'
+                                : 'bg-[#1a1d24] border-[#282d38] text-[#8e95a2]'
+                            }`}
+                          >
+                            Subdividir
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onUpdateSculptSettings({
+                                dyntopo: { ...dyn, collapse: !dyn.collapse },
+                              })
+                            }
+                            className={`h-6 rounded text-[10px] font-semibold border ${
+                              dyn.collapse
+                                ? 'bg-[#19332b] border-[#34d399]/60 text-[#6ee7b7]'
+                                : 'bg-[#1a1d24] border-[#282d38] text-[#8e95a2]'
+                            }`}
+                          >
+                            Colapsar
+                          </button>
+                        </div>
+                        <div className="text-[9px] font-mono-tabular text-[#7c8494]">
+                          {currentFaces.toLocaleString()} / {hardLimit.toLocaleString()} caras
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Voxel Remesh */}
+          {!isCompact && onRunVoxelRemesh && (
+            <div
+              data-testid="sculpt-voxel-remesh-card"
+              className="rounded-lg bg-[#121419] border border-[#282c36] p-1.5 space-y-1.5"
+            >
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="font-semibold text-[#8a93a4]">Voxel Remesh</span>
+                <span className="font-mono-tabular text-[#38bdf8]">
+                  {voxelSize.toFixed(2)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0.02}
+                max={0.4}
+                step={0.01}
+                value={voxelSize}
+                onChange={(e) => {
+                  setVoxelSize(parseFloat(e.target.value));
+                  setConfirmVoxelWarning(false);
+                }}
+                className="w-full accent-[#38bdf8] cursor-pointer"
+              />
+              {!confirmVoxelWarning ? (
+                <button
+                  type="button"
+                  data-testid="sculpt-voxel-remesh-btn"
+                  disabled={!canEditSelected || Boolean(activeGeometryTask)}
+                  onClick={() => setConfirmVoxelWarning(true)}
+                  className={buttonClass(
+                    false,
+                    !canEditSelected || Boolean(activeGeometryTask),
+                  )}
+                >
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0 text-[#38bdf8]" />
+                  <span className="truncate">Voxel Remesh</span>
+                </button>
+              ) : (
+                <div
+                  data-testid="voxel-remesh-confirm"
+                  className="rounded bg-[#2a1f14] border border-[#f59e0b]/60 p-1.5 space-y-1.5 text-[10px] text-[#fde68a]"
+                >
+                  <p className="leading-snug">
+                    Reemplaza la topología actual, descarta UVs actuales y fusiona Multiresolución.
+                  </p>
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmVoxelWarning(false)}
+                      className="flex-1 h-7 rounded bg-[#181b22] border border-[#343a48] text-[#cbd5e1] font-semibold"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="voxel-remesh-execute-btn"
+                      onClick={() => {
+                        if (!selectedMeshObject) return;
+                        setConfirmVoxelWarning(false);
+                        void onRunVoxelRemesh(selectedMeshObject.id, voxelSize, true);
+                      }}
+                      className="flex-1 h-7 rounded bg-[#38bdf8] text-[#0f1115] font-bold"
+                    >
+                      Aplicar
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </>
       ),

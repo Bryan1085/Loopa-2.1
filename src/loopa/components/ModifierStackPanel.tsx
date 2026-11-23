@@ -33,7 +33,9 @@ import {
   normalizeSubdivisionParams,
 } from '../core/modifiers/types';
 import { isEditableMeshObject } from '../core/project/hierarchy';
-import { SceneObjectData } from '../core/project/types';
+import { MultiresSubdivisionMode, SceneObjectData } from '../core/project/types';
+import type { GeometryOperationResourceEstimate } from '../core/mesh/resourceManager';
+import type { ActiveGeometryTaskState } from '../state/useModelerStore';
 
 interface ModifierStackPanelProps {
   selectedObject: SceneObjectData | null;
@@ -62,6 +64,27 @@ interface ModifierStackPanelProps {
   ngonHighlightDismissed?: boolean;
   onDismissNgonHighlight?: (modifierId: string) => void;
   onRestoreNgonHighlight?: () => void;
+  activeGeometryTask?: ActiveGeometryTaskState | null;
+  onCancelGeometryTask?: () => void;
+  onAddMultiresLevel?: (
+    objectId: string,
+    mode?: MultiresSubdivisionMode,
+    forceConfirm?: boolean,
+  ) => Promise<{
+    ok: boolean;
+    requiresConfirmation?: boolean;
+    estimate?: GeometryOperationResourceEstimate;
+    error?: string;
+  }>;
+  onSetMultiresLevel?: (objectId: string, level: number) => Promise<boolean>;
+  onSetMultiresViewportLevel?: (objectId: string, level: number) => void;
+  onToggleMultiresAutoLod?: (objectId: string, enabled: boolean) => void;
+  onSetMultiresMode?: (
+    objectId: string,
+    mode: MultiresSubdivisionMode,
+  ) => Promise<void>;
+  onDeleteMultiresHigherLevels?: (objectId: string) => void;
+  onApplyMultires?: (objectId: string) => Promise<void>;
 }
 
 function getModifierIcon(type: ModifierType | string) {
@@ -111,8 +134,22 @@ export const ModifierStackPanel: React.FC<ModifierStackPanelProps> = ({
   ngonHighlightDismissed = false,
   onDismissNgonHighlight,
   onRestoreNgonHighlight,
+  activeGeometryTask = null,
+  onCancelGeometryTask,
+  onAddMultiresLevel,
+  onSetMultiresLevel,
+  onSetMultiresViewportLevel,
+  onToggleMultiresAutoLod,
+  onSetMultiresMode,
+  onDeleteMultiresHigherLevels,
+  onApplyMultires,
 }) => {
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [pendingMultiresConfirm, setPendingMultiresConfirm] = useState<{
+    objectId: string;
+    mode: MultiresSubdivisionMode;
+    estimate: GeometryOperationResourceEstimate;
+  } | null>(null);
   const sliderHistoryRecordedRef = useRef(false);
 
   const canModify = Boolean(
@@ -121,6 +158,29 @@ export const ModifierStackPanel: React.FC<ModifierStackPanelProps> = ({
       !selectedObject.locked,
   );
   const modifiers = selectedObject?.modifiers ?? [];
+  const multires = selectedObject?.multires;
+  const isTaskBusyOnSelected = Boolean(
+    activeGeometryTask &&
+      selectedObject &&
+      activeGeometryTask.objectId === selectedObject.id,
+  );
+
+  const handleRequestAddMultires = async (
+    mode: MultiresSubdivisionMode,
+    forceConfirm = false,
+  ) => {
+    if (!selectedObject || !onAddMultiresLevel) return;
+    const res = await onAddMultiresLevel(selectedObject.id, mode, forceConfirm);
+    if (!res.ok && res.requiresConfirmation && res.estimate) {
+      setPendingMultiresConfirm({
+        objectId: selectedObject.id,
+        mode,
+        estimate: res.estimate,
+      });
+    } else {
+      setPendingMultiresConfirm(null);
+    }
+  };
 
   const handleSelectAddType = (type: ModifierType) => {
     if (!selectedObject) return;
@@ -282,6 +342,248 @@ export const ModifierStackPanel: React.FC<ModifierStackPanelProps> = ({
       {selectedObject.locked && (
         <div className="rounded-md bg-[#2a2115] border border-[#f59e0b]/40 px-2.5 py-2 text-[11px] text-[#fbbf24]">
           Objeto bloqueado. Desbloquéalo en Jerarquía para editar modificadores.
+        </div>
+      )}
+
+      {/* Multiresolución (Esculpido Progresivo) */}
+      {onAddMultiresLevel && (
+        <div
+          data-testid="multires-card"
+          className="rounded-lg border border-[#2d3442] bg-[#141821] p-2.5 space-y-2"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Sparkles className="w-3.5 h-3.5 text-[#fbbf24] shrink-0" />
+              <span className="text-[11px] font-semibold text-[#eceef2] truncate">
+                Multiresolución
+              </span>
+            </div>
+            <span className="px-1.5 py-0.5 rounded bg-[#232834] text-[10px] font-mono-tabular text-[#fbbf24] shrink-0">
+              {multires
+                ? `N${multires.currentLevel}/${multires.maxLevel}`
+                : 'Base (N0)'}
+            </span>
+          </div>
+
+          {isTaskBusyOnSelected && activeGeometryTask && (
+            <div
+              data-testid="multires-progress-box"
+              className="rounded-md bg-[#101319] border border-[#38bdf8]/50 p-2 space-y-1.5"
+            >
+              <div className="flex items-center justify-between gap-2 text-[10px]">
+                <span className="text-[#7dd3fc] font-medium truncate">
+                  {activeGeometryTask.stage || activeGeometryTask.label}
+                </span>
+                <span className="font-mono-tabular text-[#cbd5e1] shrink-0">
+                  {Math.round(activeGeometryTask.progress * 100)}%
+                </span>
+              </div>
+              <div className="h-1.5 w-full rounded bg-[#1e2430] overflow-hidden">
+                <div
+                  className="h-full bg-[#38bdf8] transition-[width] duration-150"
+                  style={{ width: `${Math.max(4, Math.min(100, activeGeometryTask.progress * 100))}%` }}
+                />
+              </div>
+              {onCancelGeometryTask && (
+                <button
+                  type="button"
+                  data-testid="multires-cancel-task-btn"
+                  onClick={onCancelGeometryTask}
+                  className="w-full h-7 rounded bg-[#2c191c] hover:bg-[#3f2024] border border-[#ef4444]/60 text-[10px] font-semibold text-[#fca5a5]"
+                >
+                  Cancelar operación
+                </button>
+              )}
+            </div>
+          )}
+
+          {pendingMultiresConfirm &&
+            pendingMultiresConfirm.objectId === selectedObject.id && (
+              <div
+                data-testid="multires-confirm-warning"
+                className="rounded-md bg-[#2a1f14] border border-[#f59e0b]/60 p-2 space-y-2 text-[10px] text-[#fde68a]"
+              >
+                <p className="leading-snug">{pendingMultiresConfirm.estimate.message}</p>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setPendingMultiresConfirm(null)}
+                    className="flex-1 h-7 rounded bg-[#181b22] border border-[#343a48] text-[#cbd5e1] font-semibold"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleRequestAddMultires(pendingMultiresConfirm.mode, true)
+                    }
+                    className="flex-1 h-7 rounded bg-[#f59e0b] text-[#111317] font-bold"
+                  >
+                    Continuar igual
+                  </button>
+                </div>
+              </div>
+            )}
+
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              data-testid="multires-subdivide-btn"
+              disabled={!canModify || isTaskBusyOnSelected}
+              onClick={() =>
+                void handleRequestAddMultires(multires?.mode ?? 'catmull_clark', false)
+              }
+              className="h-8 px-2 rounded-md bg-[#222834] hover:bg-[#2c3445] disabled:opacity-40 border border-[#363e4f] text-[11px] font-semibold text-[#f3f4f6] flex items-center justify-center gap-1"
+            >
+              <Plus className="w-3.5 h-3.5 text-[#fbbf24]" />
+              <span>Subdividir</span>
+            </button>
+
+            <div className="grid grid-cols-2 gap-1 bg-[#101216] p-0.5 rounded-md border border-[#262b36]">
+              {(
+                [
+                  { id: 'catmull_clark', label: 'Catmull' },
+                  { id: 'simple', label: 'Simple' },
+                ] as const
+              ).map((opt) => {
+                const active = (multires?.mode ?? 'catmull_clark') === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    disabled={!canModify || isTaskBusyOnSelected}
+                    onClick={() => {
+                      if (multires && onSetMultiresMode) {
+                        void onSetMultiresMode(selectedObject.id, opt.id);
+                      } else {
+                        void handleRequestAddMultires(opt.id, false);
+                      }
+                    }}
+                    className={`rounded text-[10px] font-semibold transition-colors ${
+                      active
+                        ? 'bg-[#2a3140] text-[#fbbf24]'
+                        : 'text-[#8e95a2] hover:text-white'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {multires && multires.maxLevel > 0 && (
+            <div className="space-y-1.5 pt-1 border-t border-[#242934]">
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="text-[#9ca3af]">Nivel Esculpido</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={!canModify || isTaskBusyOnSelected || multires.currentLevel <= 0}
+                    onClick={() =>
+                      void onSetMultiresLevel?.(
+                        selectedObject.id,
+                        multires.currentLevel - 1,
+                      )
+                    }
+                    className="w-6 h-6 rounded bg-[#1d212a] hover:bg-[#2a303d] disabled:opacity-35 text-xs font-bold text-white"
+                  >
+                    −
+                  </button>
+                  <span className="w-9 text-center font-mono-tabular font-semibold text-[#fbbf24]">
+                    {multires.currentLevel}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={
+                      !canModify ||
+                      isTaskBusyOnSelected ||
+                      multires.currentLevel >= multires.maxLevel
+                    }
+                    onClick={() =>
+                      void onSetMultiresLevel?.(
+                        selectedObject.id,
+                        multires.currentLevel + 1,
+                      )
+                    }
+                    className="w-6 h-6 rounded bg-[#1d212a] hover:bg-[#2a303d] disabled:opacity-35 text-xs font-bold text-white"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="text-[#9ca3af]">Nivel Viewport (LOD)</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={!canModify || multires.viewportLevel <= 0}
+                    onClick={() =>
+                      onSetMultiresViewportLevel?.(
+                        selectedObject.id,
+                        multires.viewportLevel - 1,
+                      )
+                    }
+                    className="w-6 h-6 rounded bg-[#1d212a] hover:bg-[#2a303d] disabled:opacity-35 text-xs font-bold text-white"
+                  >
+                    −
+                  </button>
+                  <span className="w-9 text-center font-mono-tabular font-semibold text-[#38bdf8]">
+                    {multires.viewportLevel}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={
+                      !canModify || multires.viewportLevel >= multires.currentLevel
+                    }
+                    onClick={() =>
+                      onSetMultiresViewportLevel?.(
+                        selectedObject.id,
+                        multires.viewportLevel + 1,
+                      )
+                    }
+                    className="w-6 h-6 rounded bg-[#1d212a] hover:bg-[#2a303d] disabled:opacity-35 text-xs font-bold text-white"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              <label className="flex items-center justify-between gap-2 text-[11px] text-[#cbd5e1] cursor-pointer py-0.5">
+                <span>Auto-LOD al rotar cámara</span>
+                <input
+                  type="checkbox"
+                  checked={multires.autoViewportLod}
+                  onChange={(e) =>
+                    onToggleMultiresAutoLod?.(selectedObject.id, e.target.checked)
+                  }
+                  className="w-4 h-4 accent-[#38bdf8]"
+                />
+              </label>
+
+              <div className="flex items-center gap-1.5 pt-1">
+                {multires.currentLevel < multires.maxLevel && (
+                  <button
+                    type="button"
+                    disabled={!canModify || isTaskBusyOnSelected}
+                    onClick={() => onDeleteMultiresHigherLevels?.(selectedObject.id)}
+                    className="flex-1 h-7 px-2 rounded bg-[#2a1a1d] hover:bg-[#3b2226] disabled:opacity-40 border border-[#ef4444]/40 text-[10px] font-semibold text-[#fca5a5]"
+                  >
+                    Eliminar superiores
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={!canModify || isTaskBusyOnSelected}
+                  onClick={() => void onApplyMultires?.(selectedObject.id)}
+                  className="flex-1 h-7 px-2 rounded bg-[#1c2a21] hover:bg-[#5ecd6e] hover:text-[#111317] disabled:opacity-40 border border-[#5ecd6e]/50 text-[10px] font-semibold text-[#86efac]"
+                >
+                  Aplicar base
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -36,7 +36,6 @@ import {
 import { Viewport3D, Viewport3DHandle } from './components/Viewport3D';
 import { WorkspaceQuickControls } from './components/WorkspaceQuickControls';
 import { EditableMesh } from './core/mesh/EditableMesh';
-import { subdivideMesh } from './core/mesh/advancedOperations';
 import {
   LoadedImageReferencePayload,
   loadReferenceImageFile,
@@ -1411,23 +1410,11 @@ export default function App() {
   const handleSubdivideSelectedMeshForSculpt = useCallback(() => {
     const obj = store.selectedObject;
     if (!obj || obj.objectType !== 'mesh' || obj.locked) return;
-    if (obj.mesh.faces.length > 6000) {
-      store.showToast(
-        'La malla ya tiene alta densidad de subdivisión para esculpir',
-      );
-      return;
-    }
-    const before = EditableMesh.fromJSON(obj.mesh);
-    const allFaces = new Set(before.faces.map((f) => f.id));
-    const res = subdivideMesh(before, 'face', allFaces, {
-      cuts: 1,
-      smoothness: obj.primitiveType === 'uv_sphere' ? 1 : 0.35,
-      fractal: 0,
+    void store.addMultiresLevel(obj.id).then((res) => {
+      if (!res.ok && res.requiresConfirmation && res.estimate) {
+        store.showToast(res.estimate.message);
+      }
     });
-    store.commitMeshEditFromGizmo(obj.id, before, res.mesh);
-    store.showToast(
-      `Malla subdividida (${res.mesh.vertices.length} vértices)`,
-    );
   }, [store]);
 
   const sceneStats: SceneStatsInfo = useMemo(() => {
@@ -1635,6 +1622,15 @@ export default function App() {
         }
       }}
       onRestoreNgonHighlight={() => setDismissedNgonKey(null)}
+      activeGeometryTask={store.activeGeometryTask}
+      onCancelGeometryTask={store.cancelActiveGeometryTask}
+      onAddMultiresLevel={store.addMultiresLevel}
+      onSetMultiresLevel={store.setMultiresLevel}
+      onSetMultiresViewportLevel={store.setMultiresViewportLevel}
+      onToggleMultiresAutoLod={store.toggleMultiresAutoLod}
+      onSetMultiresMode={store.setMultiresMode}
+      onDeleteMultiresHigherLevels={store.deleteMultiresHigherLevels}
+      onApplyMultires={store.applyMultires}
       onClose={() =>
         updateToolbarPrefs((prev) => ({
           ...prev,
@@ -1961,9 +1957,20 @@ export default function App() {
             onAddPrimitive={(type, options) => store.addPrimitive(type, options)}
             onAddLight={(type) => store.addLightObject(type)}
             sculptSettings={store.sculptSettings}
+            selectedMeshObject={
+              store.selectedObject?.objectType === 'mesh'
+                ? store.selectedObject
+                : null
+            }
+            activeGeometryTask={store.activeGeometryTask}
+            adaptiveGeometryBudgets={store.adaptiveGeometryBudgets}
+            onCancelGeometryTask={store.cancelActiveGeometryTask}
             onSelectSculptBrush={store.setSculptBrush}
             onUpdateSculptSettings={store.updateSculptSettings}
             onSubdivideSelectedMeshForSculpt={handleSubdivideSelectedMeshForSculpt}
+            onAddMultiresLevel={store.addMultiresLevel}
+            onSetMultiresLevel={store.setMultiresLevel}
+            onRunVoxelRemesh={store.runObjectVoxelRemesh}
             onDuplicateObject={store.duplicateSelectedObject}
             onApplyObjectTransform={store.applyObjectTransform}
             onCenterObjectOrigin={store.centerObjectOrigin}
@@ -2008,6 +2015,8 @@ export default function App() {
         {/* C. Materials shares its live scene and node editor in one workspace. */}
         <MaterialWorkspaceSplit
           enabled={activeView === 'materials'}
+          reserveTopLeftCorner={!toolbarPrefs.barhomeVisible}
+          reserveTopLeftWrench={toolbarPrefs.leftToolbarMode === 'hidden'}
           editor={
             <MaterialNodeViewport
               selectedObject={store.selectedObject}
@@ -2471,6 +2480,8 @@ export default function App() {
           onUpdateProportionalSettings={store.updateProportionalSettings}
           onResetToolConfig={store.resetToolConfig}
           onResetAllToolConfigs={store.resetAllToolConfigs}
+          adaptiveGeometryBudgets={store.adaptiveGeometryBudgets}
+          onPurgeGeometryCaches={store.purgeGeometryCachesAction}
           onClose={() => setSettingsModalTab(null)}
         />
       )}

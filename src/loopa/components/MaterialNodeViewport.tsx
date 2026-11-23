@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import { getObjectMaterialSlotsSummary } from "../core/project/hierarchy";
 import { MaterialAsset, SceneObjectData, TouchModifierState } from "../core/project/types";
 import { normalizeMaterialNodeGraph } from "../core/materials/nodeGraph";
 import { MaterialNodeEditor } from "./MaterialNodeEditor";
+import { useMaterialWorkspaceSplit } from "./MaterialWorkspaceSplit";
 
 interface MaterialNodeViewportProps {
   selectedObject: SceneObjectData | null;
@@ -72,6 +74,14 @@ export const MaterialNodeViewport: React.FC<MaterialNodeViewportProps> = ({
       activeMaterial ? normalizeMaterialNodeGraph(activeMaterial.nodeGraph, activeMaterial) : null,
     [activeMaterial],
   );
+  const splitContext = useMaterialWorkspaceSplit();
+  const registerInlineToggle = splitContext?.registerInlineToggle;
+  const hasActiveEditor = Boolean(activeMaterial && nodeGraph);
+
+  useEffect(() => {
+    if (hasActiveEditor || !registerInlineToggle) return;
+    return registerInlineToggle();
+  }, [hasActiveEditor, registerInlineToggle]);
 
   const materialSelector = (
     <label className="flex min-w-0 items-center">
@@ -123,7 +133,38 @@ export const MaterialNodeViewport: React.FC<MaterialNodeViewportProps> = ({
           />
         ) : (
           <div className="relative flex h-full min-h-0 flex-1 flex-col p-2">
-            <div className="flex shrink-0 items-center pb-2">{materialSelector}</div>
+            <div
+              className={`flex shrink-0 flex-wrap items-center gap-1.5 pb-2 ${
+                splitContext && !splitContext.sceneVisible && splitContext.reserveTopLeftWrench
+                  ? splitContext.reserveTopLeftCorner
+                    ? "pt-[90px] sm:pt-0 sm:pl-[188px]"
+                    : "pt-[42px] sm:pt-0 sm:pl-[188px]"
+                  : ""
+              }`}
+            >
+              {splitContext && (
+                <button
+                  type="button"
+                  data-testid="material-toggle-3d-viewport"
+                  aria-label={splitContext.sceneVisible ? "Ocultar visor 3D" : "Mostrar visor 3D"}
+                  title={
+                    splitContext.sceneVisible
+                      ? "Ocultar el visor 3D y ampliar el editor de nodos"
+                      : "Mostrar el visor 3D conservando la escena y el tamaño anterior"
+                  }
+                  onClick={splitContext.toggleSceneVisible}
+                  className="flex min-h-10 shrink-0 items-center gap-2 rounded-md border border-[#5ecd6e]/70 bg-[#1c2320] px-3 text-[11px] font-semibold text-[#e2f5e6] hover:border-[#5ecd6e] hover:bg-[#253129] hover:text-white shadow-sm touch-manipulation"
+                >
+                  {splitContext.sceneVisible ? (
+                    <EyeOff aria-hidden="true" className="h-4 w-4 text-[#5ecd6e]" />
+                  ) : (
+                    <Eye aria-hidden="true" className="h-4 w-4 text-[#5ecd6e]" />
+                  )}
+                  <span>{splitContext.sceneVisible ? "Ocultar visor 3D" : "Mostrar visor 3D"}</span>
+                </button>
+              )}
+              {materialSelector}
+            </div>
             <p
               role="status"
               className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-[#343a46] px-4 text-center text-xs text-[#8e95a2]"

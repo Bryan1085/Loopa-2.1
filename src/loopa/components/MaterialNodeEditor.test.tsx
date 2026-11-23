@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createMaterialAsset } from "../core/project/hierarchy";
 import { createDefaultMaterialNodeGraph } from "../core/materials/nodeGraph";
@@ -759,5 +759,297 @@ describe("MaterialNodeEditor", () => {
     expect(viewport).toHaveAttribute("data-shift-active", "false");
     expect(onBeginEdit).toHaveBeenCalledOnce();
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ links: [] }));
+  });
+
+  it("collapses and expands a node on short header tap while keeping sockets, category color, links and drag intact", () => {
+    const material = createMaterialAsset({ id: "collapse-tap-material" });
+    const baseGraph = createDefaultMaterialNodeGraph(material);
+    const onBeginEdit = vi.fn();
+    let latestGraph = baseGraph;
+
+    const Harness = () => {
+      const [g, setG] = useState(baseGraph);
+      return (
+        <MaterialNodeEditor
+          material={material}
+          graph={g}
+          variant="canvas"
+          onBeginEdit={onBeginEdit}
+          onChange={(next) => {
+            latestGraph = next;
+            setG(next);
+          }}
+        />
+      );
+    };
+
+    render(<Harness />);
+    const principledCard = screen
+      .getByRole("heading", { name: "Principled BSDF" })
+      .closest<HTMLElement>('[data-testid="material-node-card"]')!;
+    const header = principledCard.querySelector("header")!;
+
+    expect(principledCard).toHaveAttribute("data-collapsed", "false");
+    expect(screen.getByLabelText("Color base Principled BSDF")).toBeInTheDocument();
+    expect(principledCard.style.borderColor).toBeTruthy();
+
+    // Short tap collapses without moving
+    fireEvent.pointerDown(header, { pointerId: 1, button: 0, clientX: 50, clientY: 50 });
+    fireEvent.pointerMove(header, { pointerId: 1, clientX: 52, clientY: 51 });
+    fireEvent.pointerUp(header, { pointerId: 1, button: 0, clientX: 52, clientY: 51 });
+
+    expect(principledCard).toHaveAttribute("data-collapsed", "true");
+    expect(latestGraph.nodes.find((n) => n.type === "principled_bsdf")?.collapsed).toBe(true);
+    expect(screen.queryByLabelText("Color base Principled BSDF")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Socket de entrada Principled BSDF: Base Color")).toBeInTheDocument();
+    expect(screen.getByLabelText("Socket de salida Principled BSDF: BSDF")).toBeInTheDocument();
+    expect(screen.getAllByTestId("material-node-link")).toHaveLength(1);
+
+    // Dragging header >= 6px moves node WITHOUT expanding
+    fireEvent.pointerDown(header, { pointerId: 2, button: 0, clientX: 50, clientY: 50 });
+    fireEvent.pointerMove(header, { pointerId: 2, clientX: 110, clientY: 90 });
+    fireEvent.pointerUp(header, { pointerId: 2, button: 0, clientX: 110, clientY: 90 });
+
+    expect(principledCard).toHaveAttribute("data-collapsed", "true");
+    expect(latestGraph.nodes.find((n) => n.type === "principled_bsdf")?.position).toEqual({
+      x: 180,
+      y: 160,
+    });
+
+    // Second short tap expands again and preserves all values
+    fireEvent.pointerDown(header, { pointerId: 3, button: 0, clientX: 110, clientY: 90 });
+    fireEvent.pointerUp(header, { pointerId: 3, button: 0, clientX: 110, clientY: 90 });
+
+    expect(principledCard).toHaveAttribute("data-collapsed", "false");
+    expect(screen.getByLabelText("Color base Principled BSDF")).toBeInTheDocument();
+    expect(onBeginEdit).toHaveBeenCalledTimes(3);
+  });
+
+  it("auto-pans near viewport edges during connection drag and cancels cleanly on Escape", () => {
+    const material = createMaterialAsset({ id: "autopan-material" });
+    const baseGraph = createDefaultMaterialNodeGraph(material);
+    const graph = {
+      ...baseGraph,
+      nodes: [
+        ...baseGraph.nodes,
+        {
+          id: "math-node",
+          type: "math" as const,
+          position: { x: 40, y: 300 },
+          values: { operation: "add", a: 0.2, b: 0.3 },
+        },
+      ],
+    };
+
+    const rafCallbacks: FrameRequestCallback[] = [];
+    const origRaf = window.requestAnimationFrame;
+    const origCancelRaf = window.cancelAnimationFrame;
+    window.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+      rafCallbacks.push(cb);
+      return rafCallbacks.length;
+    }) as typeof window.requestAnimationFrame;
+    window.cancelAnimationFrame = vi.fn();
+
+    const onChange = vi.fn();
+    try {
+      render(
+        <MaterialNodeEditor
+          material={material}
+          graph={graph}
+          variant="canvas"
+          onChange={onChange}
+          onBeginEdit={vi.fn()}
+        />,
+      );
+
+      const viewport = screen.getByTestId("material-node-canvas-viewport");
+      Object.defineProperty(viewport, "getBoundingClientRect", {
+        configurable: true,
+        value: () =>
+          ({
+            left: 0,
+            top: 0,
+            right: 800,
+            bottom: 600,
+            width: 800,
+            height: 600,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      });
+
+      fireEvent.change(screen.getByLabelText("Velocidad de paneo automático"), {
+        target: { value: "1.8" },
+      });
+
+      const outSocket = screen.getByLabelText("Socket de salida Math: Value");
+      fireEvent.pointerDown(outSocket, {
+        pointerId: 88,
+        button: 0,
+        clientX: 300,
+        clientY: 320,
+      });
+      expect(screen.getByTestId("material-node-link-preview")).toBeInTheDocument();
+
+      // Move near right and bottom viewport edges
+      fireEvent.pointerMove(viewport, {
+        pointerId: 88,
+        clientX: 790,
+        clientY: 590,
+      });
+
+      // Step RAF frames manually to verify auto-pan shifts pan negative on X & Y
+      const panXBefore = Number(viewport.getAttribute("data-pan-x"));
+      const panYBefore = Number(viewport.getAttribute("data-pan-y"));
+      for (let i = 0; i < 3; i += 1) {
+        const cb = rafCallbacks.shift();
+        act(() => {
+          cb?.(performance.now() + 16 * (i + 1));
+        });
+      }
+      expect(Number(viewport.getAttribute("data-pan-x"))).toBeLessThan(panXBefore);
+      expect(Number(viewport.getAttribute("data-pan-y"))).toBeLessThan(panYBefore);
+      expect(screen.getByTestId("material-node-link-preview")).toBeInTheDocument();
+
+      // Escape cancels drag cleanly without altering links
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.queryByTestId("material-node-link-preview")).not.toBeInTheDocument();
+      expect(onChange).not.toHaveBeenCalled();
+    } finally {
+      window.requestAnimationFrame = origRaf;
+      window.cancelAnimationFrame = origCancelRaf;
+    }
+  });
+
+  it("adds and configures Noise Texture and Voronoi Texture nodes with LOOPA numeric bar controllers", () => {
+    const material = createMaterialAsset({ id: "proc-ui-material" });
+    const initialGraph = createDefaultMaterialNodeGraph(material);
+
+    const Harness = () => {
+      const [g, setG] = useState(initialGraph);
+      return (
+        <MaterialNodeEditor
+          material={material}
+          graph={g}
+          variant="canvas"
+          onBeginEdit={vi.fn()}
+          onChange={setG}
+        />
+      );
+    };
+
+    render(<Harness />);
+    const addSelect = screen.getByLabelText("Tipo de nodo para añadir");
+    fireEvent.change(addSelect, { target: { value: "noise_texture" } });
+    fireEvent.change(addSelect, { target: { value: "voronoi_texture" } });
+
+    expect(screen.getByRole("heading", { name: "Noise Texture" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Voronoi Texture" })).toBeInTheDocument();
+
+    // Switch Noise Texture to 4D so W numeric bar appears and updates
+    fireEvent.change(screen.getByLabelText("Dimensiones Noise Texture"), {
+      target: { value: "4D" },
+    });
+    expect(screen.getByLabelText("W Noise Texture")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Deslizador Escala Noise Texture"), {
+      target: { value: "12.5" },
+    });
+    expect(screen.getByLabelText("Escala Noise Texture")).toHaveValue("12.5");
+
+    // Switch Voronoi feature to Smooth F1 & metric to Minkowski -> conditional bars appear
+    fireEvent.change(screen.getByLabelText("Característica Voronoi Texture"), {
+      target: { value: "smooth_f1" },
+    });
+    fireEvent.change(screen.getByLabelText("Métrica Voronoi Texture"), {
+      target: { value: "minkowski" },
+    });
+    expect(screen.getByLabelText("Suavizado Voronoi Texture")).toBeInTheDocument();
+    expect(screen.getByLabelText("Exponente Voronoi Texture")).toBeInTheDocument();
+  });
+
+  it("supports double-tap and drag box selection, group move, group duplication preserving links, and group deletion", () => {
+    const material = createMaterialAsset({ id: "marquee-material" });
+    const baseGraph = createDefaultMaterialNodeGraph(material);
+    let latestGraph = baseGraph;
+
+    const Harness = () => {
+      const [g, setG] = useState(baseGraph);
+      return (
+        <MaterialNodeEditor
+          material={material}
+          graph={g}
+          variant="canvas"
+          onBeginEdit={vi.fn()}
+          onChange={(next) => {
+            latestGraph = next;
+            setG(next);
+          }}
+        />
+      );
+    };
+
+    render(<Harness />);
+    const viewport = screen.getByTestId("material-node-canvas-viewport");
+    Object.defineProperty(viewport, "getBoundingClientRect", {
+      configurable: true,
+      value: () =>
+        ({
+          left: 0,
+          top: 0,
+          right: 1200,
+          bottom: 800,
+          width: 1200,
+          height: 800,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    });
+
+    // First tap on empty canvas
+    fireEvent.pointerDown(viewport, { pointerId: 1, button: 0, clientX: 60, clientY: 60 });
+    fireEvent.pointerUp(viewport, { pointerId: 1, button: 0, clientX: 60, clientY: 60 });
+    expect(viewport).toHaveAttribute("data-pan-x", "0");
+
+    // Second tap + drag draws marquee rectangle over both nodes (at x=120..400 and x=520..800, y=120..380)
+    fireEvent.pointerDown(viewport, { pointerId: 2, button: 0, clientX: 62, clientY: 62 });
+    fireEvent.pointerMove(viewport, { pointerId: 2, clientX: 850, clientY: 450 });
+    expect(screen.getByTestId("material-node-selection-box")).toBeInTheDocument();
+
+    fireEvent.pointerUp(viewport, { pointerId: 2, button: 0, clientX: 850, clientY: 450 });
+    expect(screen.queryByTestId("material-node-selection-box")).not.toBeInTheDocument();
+
+    // Did not pan while box-selecting; both cards are selected and multi-selection bar shows
+    expect(viewport).toHaveAttribute("data-pan-x", "0");
+    const cards = screen.getAllByTestId("material-node-card");
+    expect(cards.every((c) => c.getAttribute("data-selected") === "true")).toBe(true);
+    expect(screen.getByTestId("material-node-multiselection-bar")).toHaveTextContent(
+      "2 nodos seleccionados",
+    );
+
+    // Move both nodes together by dragging header of first node
+    const header = screen.getByRole("heading", { name: "Principled BSDF" }).parentElement!;
+    fireEvent.pointerDown(header, { pointerId: 3, button: 0, clientX: 140, clientY: 140 });
+    fireEvent.pointerMove(header, { pointerId: 3, clientX: 190, clientY: 160 });
+    fireEvent.pointerUp(header, { pointerId: 3, button: 0, clientX: 190, clientY: 160 });
+    expect(latestGraph.nodes.find((n) => n.type === "principled_bsdf")?.position).toEqual({
+      x: 170,
+      y: 140,
+    });
+    expect(latestGraph.nodes.find((n) => n.type === "material_output")?.position).toEqual({
+      x: 570,
+      y: 140,
+    });
+
+    // Duplicate selection together -> 4 nodes and 2 links (internal link preserved between duplicates)
+    fireEvent.click(screen.getByLabelText("Duplicar selección"));
+    expect(latestGraph.nodes).toHaveLength(4);
+    expect(latestGraph.links).toHaveLength(2);
+
+    // Delete duplicated selection together -> back to 2 nodes and 1 link
+    fireEvent.click(screen.getByLabelText("Eliminar selección"));
+    expect(latestGraph.nodes).toHaveLength(2);
+    expect(latestGraph.links).toHaveLength(1);
   });
 });

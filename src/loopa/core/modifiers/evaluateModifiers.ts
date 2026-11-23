@@ -1,4 +1,5 @@
 import { SerializedEditableMesh } from '../mesh/EditableMesh';
+import { evaluateMultiresLevel } from '../mesh/multiresolution';
 import { SceneObjectData } from '../project/types';
 import { evaluateBevelModifier } from './bevelModifier';
 import { evaluateMirrorModifier } from './mirrorModifier';
@@ -341,12 +342,14 @@ export function evaluateObjectsForExport(
 ): SceneObjectData[] {
   const refs = buildTransformRefsFromObjects(allSceneObjects);
   return targets.map((obj) => {
-    if (
-      obj.objectType !== 'mesh' ||
-      !obj.modifiers ||
-      obj.modifiers.length === 0
-    ) {
-      return obj;
+    if (obj.objectType !== 'mesh') return obj;
+    const baseMesh =
+      obj.multires && obj.multires.currentLevel < obj.multires.maxLevel
+        ? evaluateMultiresLevel(obj.multires, obj.multires.maxLevel, obj.shading).toJSON()
+        : obj.mesh;
+
+    if (!obj.modifiers || obj.modifiers.length === 0) {
+      return baseMesh === obj.mesh ? obj : { ...obj, mesh: baseMesh, multires: undefined };
     }
     const owner: ModifierTransformRef = {
       id: obj.id,
@@ -354,15 +357,18 @@ export function evaluateObjectsForExport(
       rotation: obj.transform.rotation,
       scale: obj.transform.scale,
     };
-    const res = evaluateObjectModifiers(obj.mesh, obj.modifiers, {
+    const res = evaluateObjectModifiers(baseMesh, obj.modifiers, {
       ownerTransform: owner,
       sceneTransformRefs: refs,
       isApplying: true,
     });
-    if (!res.hasActiveModifiers) return obj;
+    if (!res.hasActiveModifiers) {
+      return baseMesh === obj.mesh ? obj : { ...obj, mesh: baseMesh, multires: undefined };
+    }
     return {
       ...obj,
       mesh: res.mesh,
+      multires: undefined,
       modifiers: [],
     };
   });

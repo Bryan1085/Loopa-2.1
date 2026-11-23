@@ -20,6 +20,7 @@ import {
   ReferenceImageOrientation,
   SceneData,
   SceneObjectData,
+  SerializedMultiresData,
 } from './types';
 
 export const DEFAULT_MATERIAL_COLOR = '#9aa0a6';
@@ -894,6 +895,44 @@ export function normalizeProjectHierarchy(raw: unknown): ProjectData | null {
             const normalizedLight: LightData | undefined =
               objectType === 'light' ? normalizeLightData(o.light) : undefined;
 
+            let normalizedMultires: SerializedMultiresData | undefined = undefined;
+            if (
+              objectType === 'mesh' &&
+              o.multires &&
+              typeof o.multires === 'object' &&
+              o.multires.baseMesh &&
+              Array.isArray(o.multires.baseMesh.vertices)
+            ) {
+              const maxLevel = Math.max(0, Math.round(Number(o.multires.maxLevel) || 0));
+              const currentLevel = Math.max(
+                0,
+                Math.min(maxLevel, Math.round(Number(o.multires.currentLevel) || 0)),
+              );
+              const viewportLevel = Math.max(
+                0,
+                Math.min(currentLevel, Math.round(Number(o.multires.viewportLevel) ?? currentLevel)),
+              );
+              const cleanDeltas: Record<number, number[]> = {};
+              if (o.multires.deltasByLevel && typeof o.multires.deltasByLevel === 'object') {
+                for (const [lvlKey, arr] of Object.entries(o.multires.deltasByLevel)) {
+                  const lvl = Number(lvlKey);
+                  if (Number.isInteger(lvl) && lvl >= 1 && lvl <= maxLevel && Array.isArray(arr)) {
+                    cleanDeltas[lvl] = arr.map((v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0));
+                  }
+                }
+              }
+              normalizedMultires = {
+                version: 1,
+                mode: o.multires.mode === 'simple' ? 'simple' : 'catmull_clark',
+                baseMesh: o.multires.baseMesh,
+                maxLevel,
+                currentLevel,
+                viewportLevel,
+                autoViewportLod: o.multires.autoViewportLod !== false,
+                deltasByLevel: cleanDeltas,
+              };
+            }
+
             return {
               ...o,
               transform: migratedTransform,
@@ -914,6 +953,7 @@ export function normalizeProjectHierarchy(raw: unknown): ProjectData | null {
                     )
                     .filter((m): m is ModifierSlot => m !== null)
                 : [],
+              ...(normalizedMultires ? { multires: normalizedMultires } : {}),
               ...(migratedRef ? { referenceImage: migratedRef } : {}),
               ...(normalizedLight ? { light: normalizedLight } : {}),
             };
