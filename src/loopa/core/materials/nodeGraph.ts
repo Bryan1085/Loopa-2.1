@@ -63,6 +63,8 @@ export const MATERIAL_NODE_DEFINITIONS: MaterialNodeDefinition[] = [
       socket("emission", "Emission", "color"),
       socket("emissionStrength", "Emission Strength", "float"),
       socket("normal", "Normal", "vector"),
+      socket("ao", "Ambient Occlusion", "float"),
+      socket("displacement", "Height / Displacement", "float"),
     ],
     outputs: [socket("bsdf", "BSDF", "shader")],
   },
@@ -329,6 +331,10 @@ export interface EvaluatedMaterialSurface {
   bumpScale?: number;
   roughnessTextureUrl?: string;
   metallicTextureUrl?: string;
+  aoTextureUrl?: string;
+  aoStrength?: number;
+  displacementTextureUrl?: string;
+  displacementScale?: number;
   metallic: number;
   roughness: number;
   opacity: number;
@@ -365,6 +371,8 @@ export const NODE_NUMERIC_PARAM_SPECS: Record<string, NodeNumericParamSpec> = {
   "principled_bsdf.ior": { min: 1, max: 2.5, step: 0.01, decimals: 2, clampMin: 1, clampMax: 2.5 },
   "principled_bsdf.specular": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
   "principled_bsdf.emissionStrength": { min: 0, max: 20, step: 0.1, decimals: 2, clampMin: 0 },
+  "principled_bsdf.ao": { min: 0, max: 2, step: 0.05, decimals: 2, clampMin: 0, clampMax: 2 },
+  "principled_bsdf.displacement": { min: 0, max: 0.5, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
   "emission.strength": { min: 0, max: 25, step: 0.1, decimals: 2, clampMin: 0 },
   "math.a": { min: -10, max: 10, step: 0.05, decimals: 2 },
   "math.b": { min: -10, max: 10, step: 0.05, decimals: 2 },
@@ -1581,7 +1589,7 @@ export function evaluateMaterialNodeGraph(
         };
       }
       const height = inputValue(source, "height");
-      if (!isRecord(height) || height.kind !== "image_alpha") {
+      if (!isRecord(height) || (height.kind !== "image_alpha" && height.kind !== "image_texture")) {
         unsupportedNodes.add(source.id);
         return undefined;
       }
@@ -1674,13 +1682,31 @@ export function evaluateMaterialNodeGraph(
   const roughnessIsProcedural = subtreeHasProceduralSource(principled, "roughness");
   const metallicIsProcedural = subtreeHasProceduralSource(principled, "metallic");
   const emissionIsProcedural = subtreeHasProceduralSource(principled, "emission");
+  const aoIsProcedural = subtreeHasProceduralSource(principled, "ao");
+  const displacementIsProcedural = subtreeHasProceduralSource(principled, "displacement");
 
   const baseColorValue = inputValue(principled, "baseColor");
+  const roughnessValue = inputValue(principled, "roughness");
+  const metallicValue = inputValue(principled, "metallic");
+  const aoValue = inputValue(principled, "ao");
+  const displacementValue = inputValue(principled, "displacement");
   const emissionValue = inputValue(principled, "emission");
+
+  const extractImageRecord = (val: unknown) =>
+    isRecord(val) &&
+    (val.kind === "image_texture" || val.kind === "image_alpha") &&
+    typeof val.dataUrl === "string"
+      ? val
+      : undefined;
+
   const baseColorTexture =
     isRecord(baseColorValue) && baseColorValue.kind === "image_texture"
       ? baseColorValue
       : undefined;
+  const roughnessImageTexture = extractImageRecord(roughnessValue);
+  const metallicImageTexture = extractImageRecord(metallicValue);
+  const aoImageTexture = extractImageRecord(aoValue);
+  const displacementImageTexture = extractImageRecord(displacementValue);
   const emissionImageTexture =
     isRecord(emissionValue) && emissionValue.kind === "image_texture"
       ? emissionValue
@@ -1693,6 +1719,12 @@ export function evaluateMaterialNodeGraph(
     : undefined;
   const proceduralMetallicUrl = metallicIsProcedural
     ? bakeProceduralSubtree(principled, "metallic", "scalar")
+    : undefined;
+  const proceduralAoUrl = aoIsProcedural
+    ? bakeProceduralSubtree(principled, "ao", "scalar")
+    : undefined;
+  const proceduralDisplacementUrl = displacementIsProcedural
+    ? bakeProceduralSubtree(principled, "displacement", "scalar")
     : undefined;
   const proceduralEmissionUrl = emissionIsProcedural
     ? bakeProceduralSubtree(principled, "emission", "color")
@@ -1735,6 +1767,54 @@ export function evaluateMaterialNodeGraph(
       ? emissionValue
       : fallbackSurface.emissionColor;
   const ior = Math.max(1, Math.min(2.5, scalarInput(principled, "ior", 1.45)));
+  const roughnessTextureUrl =
+    typeof roughnessImageTexture?.dataUrl === "string"
+      ? roughnessImageTexture.dataUrl
+      : proceduralRoughnessUrl;
+  const metallicTextureUrl =
+    typeof metallicImageTexture?.dataUrl === "string"
+      ? metallicImageTexture.dataUrl
+      : proceduralMetallicUrl;
+  const aoTextureUrl =
+    typeof aoImageTexture?.dataUrl === "string"
+      ? aoImageTexture.dataUrl
+      : proceduralAoUrl;
+  const displacementTextureUrl =
+    typeof displacementImageTexture?.dataUrl === "string"
+      ? displacementImageTexture.dataUrl
+      : proceduralDisplacementUrl;
+
+  const evaluatedMetallic = metallicImageTexture
+    ? clamp(principled.values.metallic ?? 1, 1)
+    : clamp(
+        scalarInput(principled, "metallic", fallbackSurface.metallic),
+        fallbackSurface.metallic,
+      );
+  const evaluatedRoughness = roughnessImageTexture
+    ? clamp(principled.values.roughness ?? 1, 1)
+    : clamp(
+        scalarInput(principled, "roughness", fallbackSurface.roughness),
+        fallbackSurface.roughness,
+      );
+  const aoStrength = aoTextureUrl
+    ? Math.max(0, Math.min(2, asNumber(principled.values.ao, 1)))
+    : undefined;
+  const displacementScale = displacementTextureUrl
+    ? Math.max(0, Math.min(1, asNumber(principled.values.displacement, 0.04)))
+    : undefined;
+  if (!aoImageTexture && !aoIsProcedural && findLink(principled.id, "ao")) {
+    scalarInput(principled, "ao", 1);
+  }
+  if (!displacementImageTexture && !displacementIsProcedural && findLink(principled.id, "displacement")) {
+    scalarInput(principled, "displacement", 0.04);
+  }
+  const evaluatedOpacity = clamp(
+    scalarInput(principled, "alpha", fallbackSurface.opacity),
+    fallbackSurface.opacity,
+  );
+  const evaluatedSpecular = clamp(scalarInput(principled, "specular", 0.5), 0.5);
+  const evaluatedEmissionStrength = Math.max(0, scalarInput(principled, "emissionStrength", 0));
+
   if (unsupportedNodes.size > 0) {
     return {
       ok: false,
@@ -1784,25 +1864,20 @@ export function evaluateMaterialNodeGraph(
       bumpTextureUrl: typeof bumpTexture?.dataUrl === "string" ? bumpTexture.dataUrl : undefined,
       bumpTextureTransform: mapTransform(bumpTexture),
       bumpScale: typeof bumpTexture?.scale === "number" ? bumpTexture.scale : undefined,
-      roughnessTextureUrl: proceduralRoughnessUrl,
-      metallicTextureUrl: proceduralMetallicUrl,
-      metallic: clamp(
-        scalarInput(principled, "metallic", fallbackSurface.metallic),
-        fallbackSurface.metallic,
-      ),
-      roughness: clamp(
-        scalarInput(principled, "roughness", fallbackSurface.roughness),
-        fallbackSurface.roughness,
-      ),
-      opacity: clamp(
-        scalarInput(principled, "alpha", fallbackSurface.opacity),
-        fallbackSurface.opacity,
-      ),
+      roughnessTextureUrl,
+      metallicTextureUrl,
+      aoTextureUrl,
+      aoStrength,
+      displacementTextureUrl,
+      displacementScale,
+      metallic: evaluatedMetallic,
+      roughness: evaluatedRoughness,
+      opacity: evaluatedOpacity,
       ior,
-      specular: clamp(scalarInput(principled, "specular", 0.5), 0.5),
+      specular: evaluatedSpecular,
       emissionColor,
       emissionTextureUrl,
-      emissionIntensity: Math.max(0, scalarInput(principled, "emissionStrength", 0)),
+      emissionIntensity: evaluatedEmissionStrength,
     },
   };
 }

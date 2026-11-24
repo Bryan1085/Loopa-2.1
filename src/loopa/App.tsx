@@ -186,6 +186,7 @@ export default function App() {
   const viewportRef = useRef<Viewport3DHandle | null>(null);
   const secondaryViewportRef = useRef<Viewport3DHandle | null>(null);
   const uvWorkspaceRef = useRef<UVWorkspaceHandle | null>(null);
+  const preUvWorkModeRef = useRef<WorkMode | null>(null);
   const [uvQuickState, setUvQuickState] = useState<UVQuickAccessState | null>(
     null,
   );
@@ -1023,20 +1024,27 @@ export default function App() {
   const handleChangeWorkspace = useCallback(
     (nextWorkspace: WorkspaceId) => {
       if (nextWorkspace === 'uv_editing') {
-        if (!store.selectedObject || store.selectedObject.objectType !== 'mesh') {
-          const firstMesh = store.activeScene.objects.find(
-            (o) => o.objectType === 'mesh',
-          );
-          if (firstMesh) {
-            store.selectObject(firstMesh.id);
-          }
+        if (activeView !== 'uv_editing') {
+          preUvWorkModeRef.current = store.workMode === 'edit' ? 'edit' : 'object';
         }
-      } else if (nextWorkspace === 'timelapse') {
-        void store.refreshTimelapseMeta(store.project.id);
+        store.enterAppWorkMode('uvs');
+      } else {
+        if (
+          activeView === 'uv_editing' &&
+          (nextWorkspace === 'layout' || nextWorkspace === 'materials') &&
+          preUvWorkModeRef.current === 'object' &&
+          store.workMode === 'edit'
+        ) {
+          store.toggleWorkMode('object');
+        }
+        preUvWorkModeRef.current = null;
+        if (nextWorkspace === 'timelapse') {
+          void store.refreshTimelapseMeta(store.project.id);
+        }
       }
       setActiveView(nextWorkspace);
     },
-    [store],
+    [activeView, store],
   );
 
   /** Open the active project in one of the LOOPA apps. */
@@ -1044,6 +1052,7 @@ export default function App() {
     (appId: LoopaAppId) => {
       setLauncherProject(null);
       if (appId === 'sculpt') {
+        preUvWorkModeRef.current = null;
         if (store.enterAppWorkMode('sculpt')) {
           setModelingAppId('sculpt');
           enterModelerWithResetCamera();
@@ -1051,16 +1060,22 @@ export default function App() {
         return;
       }
       setModelingAppId('modeler');
+      if (appId === 'uvs') {
+        handleChangeWorkspace('uv_editing');
+        return;
+      }
       store.enterAppWorkMode('modeler');
       if (appId === 'modeler') {
+        if (activeView === 'uv_editing' && preUvWorkModeRef.current === 'object') {
+          store.toggleWorkMode('object');
+        }
+        preUvWorkModeRef.current = null;
         enterModelerWithResetCamera();
-      } else if (appId === 'uvs') {
-        handleChangeWorkspace('uv_editing');
       } else if (appId === 'materials') {
         handleChangeWorkspace('materials');
       }
     },
-    [enterModelerWithResetCamera, handleChangeWorkspace, store],
+    [activeView, enterModelerWithResetCamera, handleChangeWorkspace, store],
   );
 
   /** "Compartir con LOOPA Ecosystem": save, then open the same project in another app. */
@@ -1857,7 +1872,13 @@ export default function App() {
               objectName={uvTargetObject?.name ?? null}
               objectTransform={uvTargetObject?.transform}
               materialAsset={uvTargetMaterialAsset}
+              materials={store.materials}
+              objectPrimaryMaterialId={uvTargetObject?.materialId ?? null}
+              onCreateMaterial={store.createMaterial}
               onUpdateMaterial={store.updateMaterial}
+              onAssignMaterialToObjects={store.assignMaterialToObjects}
+              onAssignMaterialToFaces={store.assignMaterialToFaces}
+              onSelectFacesByMaterial={store.selectFacesByMaterial}
               shading={uvTargetObject?.shading}
               mesh={uvTargetMesh}
               meshRevision={store.meshRevision}

@@ -19,19 +19,31 @@ export function isSupportedReferenceImageFile(file: {
 }): boolean {
   const lower = file.name.toLowerCase();
   const mime = (file.type || '').toLowerCase();
-  if (mime === 'image/jpeg' || mime === 'image/jpg' || mime === 'image/png') {
+  if (
+    mime === 'image/jpeg' ||
+    mime === 'image/jpg' ||
+    mime === 'image/png' ||
+    mime === 'image/webp'
+  ) {
     return true;
   }
   return (
-    lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.webp')
   );
 }
 
 export function detectImageMimeType(file: { name: string; type: string }): string {
   const mime = (file.type || '').toLowerCase();
   if (mime === 'image/png') return 'image/png';
+  if (mime === 'image/webp') return 'image/webp';
   if (mime === 'image/jpeg' || mime === 'image/jpg') return 'image/jpeg';
-  return file.name.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+  const lower = file.name.toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  return 'image/jpeg';
 }
 
 function readBlobAsDataUrl(blob: Blob): Promise<string> {
@@ -76,7 +88,7 @@ export async function loadReferenceImageFile(
 ): Promise<LoadedImageReferencePayload> {
   if (!isSupportedReferenceImageFile(file)) {
     throw new Error(
-      'Formato no compatible. Selecciona una imagen JPG, JPEG o PNG.',
+      'Formato no compatible. Selecciona una imagen JPG, JPEG, PNG o WEBP.',
     );
   }
 

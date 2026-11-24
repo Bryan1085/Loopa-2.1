@@ -21,6 +21,10 @@ import {
   EditSelectionMode,
 } from '../core/mesh/operations';
 import {
+  EvaluatedMaterialSurface,
+  evaluateMaterialNodeGraph,
+} from '../core/materials/nodeGraph';
+import {
   MaterialAsset,
   ObjectShadingMode,
   ObjectTransform,
@@ -28,12 +32,26 @@ import {
 import { UVIsland, UVSelectionState } from '../core/uv/types';
 import { sync3DSelectionFromUV } from '../core/uv/uvOperations';
 
+type MaterialTextureChannel =
+  | 'map'
+  | 'emissiveMap'
+  | 'normalMap'
+  | 'bumpMap'
+  | 'roughnessMap'
+  | 'metalnessMap'
+  | 'aoMap'
+  | 'displacementMap';
+
 interface UVSync3DViewportProps {
   objectId?: string | null;
   objectName?: string | null;
   mesh: EditableMesh;
   objectTransform?: ObjectTransform;
   materialAsset?: MaterialAsset | null;
+  materials?: MaterialAsset[];
+  objectPrimaryMaterialId?: string | null;
+  activeMaterialId?: string | null;
+  previewUnassignedMaterial?: boolean;
   shading?: ObjectShadingMode;
   showChecker: boolean;
   uvSelection: UVSelectionState;
@@ -143,6 +161,10 @@ export const UVSync3DViewport = forwardRef<
   mesh,
   objectTransform,
   materialAsset,
+  materials,
+  objectPrimaryMaterialId,
+  activeMaterialId,
+  previewUnassignedMaterial = false,
   shading = 'flat',
   showChecker,
   uvSelection,
@@ -157,9 +179,20 @@ export const UVSync3DViewport = forwardRef<
     camera: THREE.PerspectiveCamera;
     controls: OrbitControls;
     modelGroup: THREE.Group;
-    solidMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+    solidMesh: THREE.Mesh<
+      THREE.BufferGeometry,
+      THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial | THREE.Material[]
+    >;
+    checkerMaterial: THREE.MeshStandardMaterial;
+    fallbackMaterial: THREE.MeshStandardMaterial;
+    pooledMaterials: Map<string, THREE.MeshPhysicalMaterial>;
+    pooledTextures: Map<
+      string,
+      Partial<Record<MaterialTextureChannel, { dataUrl: string; texture: THREE.Texture }>>
+    >;
     wireEdges: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
     seamEdges: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+    materialZoneFacesMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
     selectedFacesMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
     selectedEdgesLine: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
     unselectedVerts: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
@@ -170,7 +203,6 @@ export const UVSync3DViewport = forwardRef<
     faceToTriangleRange: Map<string, { start: number; count: number }>;
     renderDirty: boolean;
   } | null>(null);
-  const materialTextureRef = useRef<THREE.Texture | null>(null);
   const latestShowCheckerRef = useRef(showChecker);
   latestShowCheckerRef.current = showChecker;
 
@@ -292,18 +324,31 @@ export const UVSync3DViewport = forwardRef<
     const checkerTexture = createCheckerTexture();
     const dotTexture = createVertexDotTexture();
 
-    const solidMesh = new THREE.Mesh(
-      new THREE.BufferGeometry(),
-      new THREE.MeshStandardMaterial({
-        color: 0xa1a7b3,
-        roughness: 0.55,
-        metalness: 0.08,
-        side: THREE.DoubleSide,
-        polygonOffset: true,
-        polygonOffsetFactor: 1,
-        polygonOffsetUnits: 1,
-      }),
-    );
+    const checkerMaterial = new THREE.MeshStandardMaterial({
+      map: checkerTexture,
+      color: 0xffffff,
+      roughness: 0.65,
+      metalness: 0.04,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+
+    const fallbackMaterial = new THREE.MeshStandardMaterial({
+      color: 0xa1a7b3,
+      roughness: 0.55,
+      metalness: 0.08,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+
+    const solidMesh = new THREE.Mesh<
+      THREE.BufferGeometry,
+      THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial | THREE.Material[]
+    >(new THREE.BufferGeometry(), fallbackMaterial);
 
     const wireEdges = new THREE.LineSegments(
       new THREE.BufferGeometry(),
@@ -325,6 +370,23 @@ export const UVSync3DViewport = forwardRef<
       }),
     );
     seamEdges.renderOrder = 4;
+
+    const materialZoneFacesMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.22,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      }),
+    );
+    materialZoneFacesMesh.renderOrder = 2;
+    materialZoneFacesMesh.visible = false;
 
     const selectedFacesMesh = new THREE.Mesh(
       new THREE.BufferGeometry(),
@@ -382,6 +444,7 @@ export const UVSync3DViewport = forwardRef<
 
     modelGroup.add(
       solidMesh,
+      materialZoneFacesMesh,
       selectedFacesMesh,
       wireEdges,
       seamEdges,
@@ -410,8 +473,16 @@ export const UVSync3DViewport = forwardRef<
       controls,
       modelGroup,
       solidMesh,
+      checkerMaterial,
+      fallbackMaterial,
+      pooledMaterials: new Map<string, THREE.MeshPhysicalMaterial>(),
+      pooledTextures: new Map<
+        string,
+        Partial<Record<MaterialTextureChannel, { dataUrl: string; texture: THREE.Texture }>>
+      >(),
       wireEdges,
       seamEdges,
+      materialZoneFacesMesh,
       selectedFacesMesh,
       selectedEdgesLine,
       unselectedVerts,
@@ -623,11 +694,20 @@ export const UVSync3DViewport = forwardRef<
       dom.removeEventListener('pointercancel', onPointerCancel);
       controls.dispose();
       solidMesh.geometry.dispose();
-      solidMesh.material.dispose();
+      checkerMaterial.dispose();
+      fallbackMaterial.dispose();
+      for (const m of ctx.pooledMaterials.values()) m.dispose();
+      ctx.pooledMaterials.clear();
+      for (const texMap of ctx.pooledTextures.values()) {
+        Object.values(texMap).forEach((entry) => entry?.texture.dispose());
+      }
+      ctx.pooledTextures.clear();
       wireEdges.geometry.dispose();
       wireEdges.material.dispose();
       seamEdges.geometry.dispose();
       seamEdges.material.dispose();
+      materialZoneFacesMesh.geometry.dispose();
+      materialZoneFacesMesh.material.dispose();
       selectedFacesMesh.geometry.dispose();
       selectedFacesMesh.material.dispose();
       selectedEdgesLine.geometry.dispose();
@@ -646,7 +726,7 @@ export const UVSync3DViewport = forwardRef<
     };
   }, []);
 
-  // Sync mesh geometry, seams, material, and checker preview
+  // Sync mesh geometry, seams, multi-material groups, PBR maps, and checker preview
   useEffect(() => {
     const ctx = sceneObjectsRef.current;
     if (!ctx) return;
@@ -661,7 +741,11 @@ export const UVSync3DViewport = forwardRef<
       ctx.modelGroup.scale.set(1, 1, 1);
     }
 
-    const triData = mesh.buildTriangulatedData(shading);
+    const effectivePrimaryId =
+      previewUnassignedMaterial && materialAsset
+        ? materialAsset.id
+        : objectPrimaryMaterialId ?? materialAsset?.id ?? '__default__';
+    const triData = mesh.buildTriangulatedData(shading, effectivePrimaryId);
     const solidGeo = new THREE.BufferGeometry();
     solidGeo.setAttribute(
       'position',
@@ -673,6 +757,39 @@ export const UVSync3DViewport = forwardRef<
     );
     if (triData.uvs) {
       solidGeo.setAttribute('uv', new THREE.BufferAttribute(triData.uvs, 2));
+      solidGeo.setAttribute('uv2', new THREE.BufferAttribute(triData.uvs, 2));
+    } else if (triData.positions.length > 0) {
+      const vertCount = triData.positions.length / 3;
+      const boxUvs = new Float32Array(vertCount * 2);
+      for (let i = 0; i < vertCount; i += 1) {
+        const px = triData.positions[i * 3];
+        const py = triData.positions[i * 3 + 1];
+        const pz = triData.positions[i * 3 + 2];
+        const nx = Math.abs(triData.normals[i * 3]);
+        const ny = Math.abs(triData.normals[i * 3 + 1]);
+        const nz = Math.abs(triData.normals[i * 3 + 2]);
+        if (nz >= nx && nz >= ny) {
+          boxUvs[i * 2] = px * 0.5 + 0.5;
+          boxUvs[i * 2 + 1] = py * 0.5 + 0.5;
+        } else if (nx >= ny) {
+          boxUvs[i * 2] = py * 0.5 + 0.5;
+          boxUvs[i * 2 + 1] = pz * 0.5 + 0.5;
+        } else {
+          boxUvs[i * 2] = px * 0.5 + 0.5;
+          boxUvs[i * 2 + 1] = pz * 0.5 + 0.5;
+        }
+      }
+      solidGeo.setAttribute('uv', new THREE.BufferAttribute(boxUvs, 2));
+      solidGeo.setAttribute('uv2', new THREE.BufferAttribute(boxUvs, 2));
+    }
+
+    if (!showChecker && !previewUnassignedMaterial) {
+      solidGeo.clearGroups();
+      for (const grp of triData.materialGroups) {
+        if (grp.count > 0) {
+          solidGeo.addGroup(grp.start, grp.count, grp.materialIndex);
+        }
+      }
     }
     solidGeo.computeBoundingSphere();
 
@@ -681,26 +798,282 @@ export const UVSync3DViewport = forwardRef<
     ctx.triangleToFaceId = triData.triangleToFaceId;
     ctx.faceToTriangleRange = triData.faceToTriangleRange;
 
-    const mat = ctx.solidMesh.material;
-    if (showChecker) {
-      mat.map = ctx.checkerTexture;
-      mat.color.setHex(0xffffff);
-      mat.metalness = 0.04;
-      mat.roughness = 0.65;
-    } else if (materialAsset) {
-      mat.map = materialTextureRef.current;
-      mat.color.set(
-        materialAsset.textureDataUrl ? '#ffffff' : materialAsset.baseColor,
-      );
-      mat.metalness = materialAsset.metallic;
-      mat.roughness = materialAsset.roughness;
-    } else {
-      mat.map = null;
-      mat.color.setHex(0x9ca3af);
-      mat.metalness = 0.08;
-      mat.roughness = 0.55;
+    const allMaterialsList =
+      materials && materials.length > 0
+        ? materials
+        : materialAsset
+          ? [materialAsset]
+          : [];
+    const materialById = new Map(allMaterialsList.map((m) => [m.id, m]));
+    if (materialAsset && !materialById.has(materialAsset.id)) {
+      materialById.set(materialAsset.id, materialAsset);
     }
-    mat.needsUpdate = true;
+
+    const syncTextureChannel = (
+      matAsset: MaterialAsset,
+      threeMat: THREE.MeshPhysicalMaterial,
+      channel: MaterialTextureChannel,
+      dataUrl: string | undefined,
+      transform?: EvaluatedMaterialSurface['textureTransform'],
+    ) => {
+      const matTextures = ctx.pooledTextures.get(matAsset.id) ?? {};
+      const current = matTextures[channel];
+      const applyTransform = (texture: THREE.Texture) => {
+        const location = transform?.location ?? [0, 0, 0];
+        const rotation = transform?.rotation ?? [0, 0, 0];
+        const scale = transform?.scale ?? [1, 1, 1];
+        texture.offset.set(location[0], location[1]);
+        texture.repeat.set(scale[0], scale[1]);
+        texture.rotation = rotation[2];
+        texture.wrapS =
+          scale[0] === 1 ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+        texture.wrapT =
+          scale[1] === 1 ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+        texture.needsUpdate = true;
+      };
+
+      if (!dataUrl) {
+        if (current) {
+          current.texture.dispose();
+          delete matTextures[channel];
+          if (Object.keys(matTextures).length === 0) {
+            ctx.pooledTextures.delete(matAsset.id);
+          } else {
+            ctx.pooledTextures.set(matAsset.id, matTextures);
+          }
+        }
+        if (threeMat[channel]) {
+          threeMat[channel] = null;
+          threeMat.needsUpdate = true;
+        }
+        return;
+      }
+
+      if (current?.dataUrl === dataUrl) {
+        applyTransform(current.texture);
+        if (threeMat[channel] !== current.texture) {
+          threeMat[channel] = current.texture;
+          threeMat.needsUpdate = true;
+        }
+        return;
+      }
+
+      current?.texture.dispose();
+      const isSrgb = channel === 'map' || channel === 'emissiveMap';
+      const texture = new THREE.TextureLoader().load(
+        dataUrl,
+        () => {
+          if (
+            ctx.pooledTextures.get(matAsset.id)?.[channel]?.texture !== texture
+          ) {
+            return;
+          }
+          texture.colorSpace = isSrgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+          applyTransform(texture);
+          const currentCtx = sceneObjectsRef.current;
+          if (currentCtx) currentCtx.renderDirty = true;
+        },
+        undefined,
+        () => {
+          if (
+            ctx.pooledTextures.get(matAsset.id)?.[channel]?.texture !== texture
+          ) {
+            return;
+          }
+          delete matTextures[channel];
+          if (threeMat[channel] === texture) {
+            threeMat[channel] = null;
+            threeMat.needsUpdate = true;
+          }
+          texture.dispose();
+        },
+      );
+      texture.colorSpace = isSrgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      applyTransform(texture);
+      matTextures[channel] = { dataUrl, texture };
+      ctx.pooledTextures.set(matAsset.id, matTextures);
+      threeMat[channel] = texture;
+      threeMat.needsUpdate = true;
+    };
+
+    const getOrSyncThreeMaterial = (matAsset: MaterialAsset): THREE.MeshPhysicalMaterial => {
+      let threeMat = ctx.pooledMaterials.get(matAsset.id);
+      const evaluation = matAsset.nodeGraph
+        ? evaluateMaterialNodeGraph(matAsset.nodeGraph, matAsset)
+        : null;
+      const surface: EvaluatedMaterialSurface = evaluation?.ok
+        ? evaluation.surface
+        : {
+            baseColor: matAsset.baseColor,
+            baseColorTextureUrl: matAsset.textureDataUrl,
+            textureName: matAsset.textureName,
+            metallic: matAsset.metallic,
+            roughness: matAsset.roughness,
+            opacity: matAsset.opacity ?? 1,
+            ior: 1.45,
+            specular: 0.5,
+            emissionColor: matAsset.emissiveColor ?? '#000000',
+            emissionIntensity: matAsset.emissiveIntensity ?? 0,
+          };
+
+      const textureDataUrl = surface.baseColorTextureUrl;
+      const opacity = Math.max(0.02, Math.min(1, surface.opacity ?? 1));
+      const isTransparent = opacity < 0.999;
+      const effectiveMetalness = surface.metallicTextureUrl ? 1 : surface.metallic;
+      const effectiveRoughness = surface.roughnessTextureUrl ? 1 : surface.roughness;
+      const hasEmissionColor = Boolean(
+        surface.emissionColor && surface.emissionIntensity > 0,
+      );
+      const hasEmissionMap = Boolean(surface.emissionTextureUrl);
+      const targetEmissive = hasEmissionMap
+        ? surface.emissionColor || '#ffffff'
+        : hasEmissionColor
+          ? surface.emissionColor!
+          : '#000000';
+      const targetEmissiveIntensity =
+        hasEmissionMap || hasEmissionColor ? surface.emissionIntensity ?? 1 : 0;
+
+      if (!threeMat) {
+        threeMat = new THREE.MeshPhysicalMaterial({
+          color: textureDataUrl ? '#ffffff' : surface.baseColor,
+          metalness: effectiveMetalness,
+          roughness: effectiveRoughness,
+          ior: surface.ior,
+          specularIntensity: surface.specular,
+          opacity,
+          transparent: isTransparent,
+          depthWrite: !isTransparent,
+          side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1,
+        });
+        threeMat.emissive.set(targetEmissive);
+        threeMat.emissiveIntensity = targetEmissiveIntensity;
+        ctx.pooledMaterials.set(matAsset.id, threeMat);
+      } else {
+        threeMat.color.set(textureDataUrl ? '#ffffff' : surface.baseColor);
+        threeMat.metalness = effectiveMetalness;
+        threeMat.roughness = effectiveRoughness;
+        threeMat.ior = surface.ior;
+        threeMat.specularIntensity = surface.specular;
+        if (threeMat.transparent !== isTransparent) {
+          threeMat.transparent = isTransparent;
+          threeMat.needsUpdate = true;
+        }
+        threeMat.opacity = opacity;
+        threeMat.depthWrite = !isTransparent;
+        threeMat.emissive.set(targetEmissive);
+        threeMat.emissiveIntensity = targetEmissiveIntensity;
+      }
+
+      syncTextureChannel(matAsset, threeMat, 'map', textureDataUrl, surface.textureTransform);
+      syncTextureChannel(
+        matAsset,
+        threeMat,
+        'emissiveMap',
+        surface.emissionTextureUrl,
+        surface.textureTransform,
+      );
+      syncTextureChannel(
+        matAsset,
+        threeMat,
+        'normalMap',
+        surface.normalTextureUrl,
+        surface.normalTextureTransform,
+      );
+      const normalStrength = surface.normalMapStrength ?? 1;
+      threeMat.normalScale.set(normalStrength, normalStrength);
+      syncTextureChannel(
+        matAsset,
+        threeMat,
+        'bumpMap',
+        surface.bumpTextureUrl,
+        surface.bumpTextureTransform,
+      );
+      threeMat.bumpScale = surface.bumpScale ?? 1;
+      syncTextureChannel(matAsset, threeMat, 'roughnessMap', surface.roughnessTextureUrl);
+      syncTextureChannel(matAsset, threeMat, 'metalnessMap', surface.metallicTextureUrl);
+      syncTextureChannel(matAsset, threeMat, 'aoMap', surface.aoTextureUrl);
+      threeMat.aoMapIntensity = surface.aoTextureUrl
+        ? Math.max(0, Math.min(2, surface.aoStrength ?? 1))
+        : 1;
+      syncTextureChannel(
+        matAsset,
+        threeMat,
+        'displacementMap',
+        surface.displacementTextureUrl,
+      );
+      threeMat.displacementScale = surface.displacementTextureUrl
+        ? (surface.displacementScale ?? 0.04)
+        : 0;
+
+      return threeMat;
+    };
+
+    // Prune deleted materials from pool
+    for (const [id, m] of ctx.pooledMaterials.entries()) {
+      if (!materialById.has(id)) {
+        m.dispose();
+        ctx.pooledMaterials.delete(id);
+        const texs = ctx.pooledTextures.get(id);
+        if (texs) {
+          Object.values(texs).forEach((entry) => entry?.texture.dispose());
+          ctx.pooledTextures.delete(id);
+        }
+      }
+    }
+
+    if (showChecker) {
+      ctx.solidMesh.material = ctx.checkerMaterial;
+    } else if (previewUnassignedMaterial && materialAsset) {
+      ctx.solidMesh.material = getOrSyncThreeMaterial(materialAsset);
+    } else if (triData.materialIds.length > 1) {
+      const slotMats: THREE.Material[] = triData.materialIds.map((slotId) => {
+        const found =
+          materialById.get(slotId) ??
+          (objectPrimaryMaterialId ? materialById.get(objectPrimaryMaterialId) : undefined) ??
+          materialAsset;
+        return found ? getOrSyncThreeMaterial(found) : ctx.fallbackMaterial;
+      });
+      ctx.solidMesh.material = slotMats;
+    } else {
+      const singleMat =
+        (triData.materialIds[0] ? materialById.get(triData.materialIds[0]) : undefined) ??
+        materialAsset;
+      ctx.solidMesh.material = singleMat
+        ? getOrSyncThreeMaterial(singleMat)
+        : ctx.fallbackMaterial;
+    }
+
+    // Highlight active material zone when object uses multiple materials
+    const zonePos: number[] = [];
+    const targetZoneMatId = activeMaterialId ?? materialAsset?.id;
+    if (
+      !showChecker &&
+      !previewUnassignedMaterial &&
+      triData.materialIds.length > 1 &&
+      targetZoneMatId
+    ) {
+      const solidPos = solidGeo.getAttribute('position');
+      const fallbackMatId = objectPrimaryMaterialId ?? materialAsset?.id;
+      for (const face of mesh.faces) {
+        const effMatId = face.materialId || fallbackMatId;
+        if (effMatId !== targetZoneMatId) continue;
+        const range = triData.faceToTriangleRange.get(face.id);
+        if (!range || !solidPos) continue;
+        const startVert = range.start * 3;
+        const endVert = (range.start + range.count) * 3;
+        for (let i = startVert; i < endVert; i++) {
+          zonePos.push(solidPos.getX(i), solidPos.getY(i), solidPos.getZ(i));
+        }
+      }
+    }
+    const zoneGeo = new THREE.BufferGeometry();
+    zoneGeo.setAttribute('position', new THREE.Float32BufferAttribute(zonePos, 3));
+    ctx.materialZoneFacesMesh.geometry.dispose();
+    ctx.materialZoneFacesMesh.geometry = zoneGeo;
+    ctx.materialZoneFacesMesh.visible = zonePos.length > 0;
 
     // Wireframe & Seam lines
     const wirePos: number[] = [];
@@ -726,77 +1099,17 @@ export const UVSync3DViewport = forwardRef<
     ctx.seamEdges.visible = seamPos.length > 0;
 
     ctx.renderDirty = true;
-  }, [materialAsset, mesh, objectTransform, shading, showChecker]);
-
-  useEffect(() => {
-    const previousTexture = materialTextureRef.current;
-    if (previousTexture) {
-      previousTexture.dispose();
-      materialTextureRef.current = null;
-    }
-
-    const dataUrl = materialAsset?.textureDataUrl;
-    const ctx = sceneObjectsRef.current;
-    if (!dataUrl) {
-      if (ctx && !latestShowCheckerRef.current) {
-        ctx.solidMesh.material.map = null;
-        ctx.solidMesh.material.needsUpdate = true;
-        ctx.renderDirty = true;
-      }
-      return;
-    }
-
-    let disposed = false;
-    let texture: THREE.Texture;
-    texture = new THREE.TextureLoader().load(
-      dataUrl,
-      () => {
-        if (disposed || materialTextureRef.current !== texture) return;
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.needsUpdate = true;
-        const current = sceneObjectsRef.current;
-        if (!current) return;
-        if (!latestShowCheckerRef.current) {
-          current.solidMesh.material.map = texture;
-          current.solidMesh.material.color.set('#ffffff');
-          current.solidMesh.material.needsUpdate = true;
-        }
-        current.renderDirty = true;
-      },
-      undefined,
-      (error) => {
-        if (disposed || materialTextureRef.current !== texture) return;
-        console.error(
-          `No se pudo cargar la textura "${materialAsset.textureName ?? materialAsset.name}".`,
-          error,
-        );
-        materialTextureRef.current = null;
-        const current = sceneObjectsRef.current;
-        if (current && !latestShowCheckerRef.current) {
-          current.solidMesh.material.map = null;
-          current.solidMesh.material.color.set(materialAsset.baseColor);
-          current.solidMesh.material.needsUpdate = true;
-          current.renderDirty = true;
-        }
-        texture.dispose();
-      },
-    );
-    texture.colorSpace = THREE.SRGBColorSpace;
-    materialTextureRef.current = texture;
-    if (ctx && !latestShowCheckerRef.current) {
-      ctx.solidMesh.material.map = texture;
-      ctx.solidMesh.material.needsUpdate = true;
-      ctx.renderDirty = true;
-    }
-
-    return () => {
-      disposed = true;
-      if (materialTextureRef.current === texture) {
-        materialTextureRef.current = null;
-      }
-      texture.dispose();
-    };
-  }, [materialAsset?.textureDataUrl]);
+  }, [
+    activeMaterialId,
+    materialAsset,
+    materials,
+    mesh,
+    objectPrimaryMaterialId,
+    objectTransform,
+    previewUnassignedMaterial,
+    shading,
+    showChecker,
+  ]);
 
   // Auto-frame when switching selected object
   useEffect(() => {

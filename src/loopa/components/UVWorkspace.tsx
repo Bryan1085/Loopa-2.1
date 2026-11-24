@@ -12,20 +12,31 @@ import React, {
   useState,
 } from 'react';
 import {
+  CheckCircle2,
   Crosshair,
   FlipHorizontal,
   FlipVertical,
+  Image as ImageIcon,
   Layers,
   Maximize2,
   Move,
+  Palette,
   RotateCw,
   Scissors,
   Sparkles,
 } from 'lucide-react';
 import { loadReferenceImageFile } from '../core/io/imageReference';
+import {
+  buildPbrMaterialPayload,
+  extractMaterialPbrMaps,
+  PBR_CHANNEL_IDS,
+  PBR_CHANNEL_SPECS,
+  PbrChannelId,
+  PbrImportedTexture,
+} from '../core/materials/pbrImport';
 import { EditableMesh, Vec2 } from '../core/mesh/EditableMesh';
 import { EditSelectionSubMode } from '../core/mesh/loopSelect';
-import { EditSelectionMode } from '../core/mesh/operations';
+import { computeDerivedEditSelection, EditSelectionMode } from '../core/mesh/operations';
 import {
   MaterialAsset,
   ObjectShadingMode,
@@ -66,6 +77,7 @@ import {
   extractUVIslands,
   packUVIslands,
 } from '../core/uv/uvUnwrap';
+import { PbrAssignScope, PbrMaterialImportModal } from './PbrMaterialImportModal';
 import { UVEditorCanvas, UVEditorCanvasHandle } from './UVEditorCanvas';
 import { UVSync3DViewport, UVSync3DViewportHandle } from './UVSync3DViewport';
 import { UVToolToolbar } from './UVToolToolbar';
@@ -117,7 +129,24 @@ interface UVWorkspaceProps {
   objectName?: string | null;
   objectTransform?: ObjectTransform;
   materialAsset?: MaterialAsset | null;
-  onUpdateMaterial?: (materialId: string, patch: Partial<Omit<MaterialAsset, 'id'>>) => void;
+  materials?: MaterialAsset[];
+  objectPrimaryMaterialId?: string | null;
+  onCreateMaterial?: (
+    initial?: Partial<Omit<MaterialAsset, 'id'>>,
+    assignToSelected?: boolean,
+  ) => MaterialAsset;
+  onUpdateMaterial?: (
+    materialId: string,
+    patch: Partial<Omit<MaterialAsset, 'id'>>,
+    recordHistory?: boolean,
+  ) => void;
+  onAssignMaterialToObjects?: (objectIds: string[], materialId: string) => void;
+  onAssignMaterialToFaces?: (
+    objectId: string,
+    faceIds: Set<string>,
+    materialId: string,
+  ) => void;
+  onSelectFacesByMaterial?: (objectId: string, materialId: string) => void;
   shading?: ObjectShadingMode;
   mesh: EditableMesh | null;
   meshRevision?: number;
@@ -140,7 +169,13 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
       objectName,
       objectTransform,
       materialAsset,
+      materials,
+      objectPrimaryMaterialId,
+      onCreateMaterial,
       onUpdateMaterial,
+      onAssignMaterialToObjects,
+      onAssignMaterialToFaces,
+      onSelectFacesByMaterial,
       shading = 'flat',
       mesh,
       meshRevision = 0,
@@ -186,6 +221,15 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
       orientation: 'horizontal' | 'vertical';
     } | null>(null);
 
+    // Material & PBR state
+    const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(
+      () => objectPrimaryMaterialId ?? materialAsset?.id ?? materials?.[0]?.id ?? null,
+    );
+    const [active2DTextureChannel, setActive2DTextureChannel] = useState<
+      'auto' | PbrChannelId | 'none'
+    >('auto');
+    const [pbrModalOpen, setPbrModalOpen] = useState(false);
+
     // Numeric transform inputs
     const [moveUInput, setMoveUInput] = useState('0.00');
     const [moveVInput, setMoveVInput] = useState('0.00');
@@ -193,6 +237,46 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
     const [scaleXInput, setScaleXInput] = useState('1.00');
     const [scaleYInput, setScaleYInput] = useState('1.00');
     const [scaleUniform, setScaleUniform] = useState(true);
+
+    const effectiveMaterials = useMemo<MaterialAsset[]>(() => {
+      if (materials && materials.length > 0) return materials;
+      return materialAsset ? [materialAsset] : [];
+    }, [materials, materialAsset]);
+
+    // Sync default inspected material when switching objects or when selected material is deleted
+    useEffect(() => {
+      const preferred =
+        objectPrimaryMaterialId ?? materialAsset?.id ?? effectiveMaterials[0]?.id ?? null;
+      setSelectedMaterialId(preferred);
+    }, [objectId, objectPrimaryMaterialId]);
+
+    useEffect(() => {
+      if (
+        selectedMaterialId &&
+        effectiveMaterials.some((m) => m.id === selectedMaterialId)
+      ) {
+        return;
+      }
+      setSelectedMaterialId(
+        objectPrimaryMaterialId ?? materialAsset?.id ?? effectiveMaterials[0]?.id ?? null,
+      );
+    }, [effectiveMaterials, materialAsset?.id, objectPrimaryMaterialId, selectedMaterialId]);
+
+    const activeMaterialAsset = useMemo<MaterialAsset | null>(() => {
+      if (effectiveMaterials.length === 0) return materialAsset ?? null;
+      if (selectedMaterialId) {
+        const found = effectiveMaterials.find((m) => m.id === selectedMaterialId);
+        if (found) return found;
+      }
+      return (
+        (objectPrimaryMaterialId
+          ? effectiveMaterials.find((m) => m.id === objectPrimaryMaterialId)
+          : undefined) ??
+        materialAsset ??
+        effectiveMaterials[0] ??
+        null
+      );
+    }, [effectiveMaterials, materialAsset, objectPrimaryMaterialId, selectedMaterialId]);
 
     const showUvToast = (msg: string) => {
       setUvToast(msg);
@@ -206,7 +290,7 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
     };
 
     const handleImportTexture = () => {
-      if (!materialAsset || !onUpdateMaterial) {
+      if (!activeMaterialAsset || !onUpdateMaterial) {
         showUvToast('Selecciona una malla con material para importar una textura');
         return;
       }
@@ -217,18 +301,20 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
       const file = event.currentTarget.files?.[0];
       event.currentTarget.value = '';
       if (!file) return;
-      if (!materialAsset || !onUpdateMaterial) {
+      if (!activeMaterialAsset || !onUpdateMaterial) {
         showUvToast('No hay un material activo para esta imagen');
         return;
       }
 
       try {
         const image = await loadReferenceImageFile(file);
-        onUpdateMaterial(materialAsset.id, {
+        onUpdateMaterial(activeMaterialAsset.id, {
           textureName: image.fileName,
           textureDataUrl: image.imageDataUrl,
         });
-        showUvToast(`Textura "${image.fileName}" aplicada al material`);
+        showUvToast(
+          `Textura "${image.fileName}" aplicada a "${activeMaterialAsset.name}"`,
+        );
       } catch (error) {
         showUvToast(error instanceof Error ? error.message : 'No se pudo importar la imagen');
       }
@@ -279,6 +365,168 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
     );
     const selectedCount = getUVSelectionCount(selection);
     const canWeldUV = selectionBounds.count >= 2;
+
+    const selectedFaceIds = useMemo(() => {
+      if (!activeMesh) return new Set<string>();
+      const synced = sync3DSelectionFromUV(activeMesh, selection, islands);
+      if (synced.mode === 'face') return synced.ids;
+      return computeDerivedEditSelection(activeMesh, synced.mode, synced.ids).faceIds;
+    }, [activeMesh, selection, islands]);
+
+    const objectMaterialSlotMap = useMemo(() => {
+      const map = new Map<string, { faceCount: number; isPrimary: boolean }>();
+      const primaryId = objectPrimaryMaterialId ?? materialAsset?.id ?? effectiveMaterials[0]?.id;
+      if (primaryId) {
+        map.set(primaryId, { faceCount: 0, isPrimary: true });
+      }
+      if (!activeMesh) return map;
+      const validIds =
+        effectiveMaterials.length > 0
+          ? new Set(effectiveMaterials.map((m) => m.id))
+          : null;
+      for (const face of activeMesh.faces) {
+        const fMat =
+          typeof face.materialId === 'string' &&
+          face.materialId &&
+          (!validIds || validIds.has(face.materialId))
+            ? face.materialId
+            : primaryId;
+        if (!fMat) continue;
+        const curr = map.get(fMat) ?? { faceCount: 0, isPrimary: fMat === primaryId };
+        curr.faceCount += 1;
+        map.set(fMat, curr);
+      }
+      return map;
+    }, [activeMesh, effectiveMaterials, materialAsset?.id, objectPrimaryMaterialId]);
+
+    const assignedSlots = useMemo(
+      () =>
+        effectiveMaterials
+          .filter((m) => {
+            const slot = objectMaterialSlotMap.get(m.id);
+            return Boolean(slot && (slot.isPrimary || slot.faceCount > 0));
+          })
+          .map((m) => ({
+            material: m,
+            ...objectMaterialSlotMap.get(m.id)!,
+          })),
+      [effectiveMaterials, objectMaterialSlotMap],
+    );
+
+    const libraryOnlyMaterials = useMemo(
+      () =>
+        effectiveMaterials.filter((m) => {
+          const slot = objectMaterialSlotMap.get(m.id);
+          return !slot || (!slot.isPrimary && slot.faceCount === 0);
+        }),
+      [effectiveMaterials, objectMaterialSlotMap],
+    );
+
+    const activeSlotInfo = activeMaterialAsset
+      ? objectMaterialSlotMap.get(activeMaterialAsset.id)
+      : undefined;
+    const isPreviewingUnassignedMaterial = Boolean(
+      activeMaterialAsset &&
+        (!activeSlotInfo || (!activeSlotInfo.isPrimary && activeSlotInfo.faceCount === 0)),
+    );
+
+    const pbrChannels = useMemo(
+      () => extractMaterialPbrMaps(activeMaterialAsset),
+      [activeMaterialAsset],
+    );
+
+    const loadedPbrChannels = useMemo(
+      () => PBR_CHANNEL_IDS.filter((ch) => pbrChannels[ch].loaded),
+      [pbrChannels],
+    );
+
+    const active2DTextureUrl = useMemo(() => {
+      if (active2DTextureChannel === 'none') return undefined;
+      if (active2DTextureChannel !== 'auto') {
+        const specific = pbrChannels[active2DTextureChannel];
+        if (specific?.dataUrl) return specific.dataUrl;
+      }
+      if (pbrChannels.baseColor.dataUrl) return pbrChannels.baseColor.dataUrl;
+      const firstLoaded = loadedPbrChannels[0];
+      return firstLoaded ? pbrChannels[firstLoaded].dataUrl : activeMaterialAsset?.textureDataUrl;
+    }, [active2DTextureChannel, activeMaterialAsset?.textureDataUrl, loadedPbrChannels, pbrChannels]);
+
+    const handleSelectMaterialFaces = () => {
+      if (!activeMesh || !activeMaterialAsset) return;
+      const primaryId = objectPrimaryMaterialId ?? materialAsset?.id ?? effectiveMaterials[0]?.id;
+      const matchingFaceIds = new Set<string>();
+      for (const face of activeMesh.faces) {
+        const effMat = face.materialId || primaryId;
+        if (effMat === activeMaterialAsset.id) {
+          matchingFaceIds.add(face.id);
+        }
+      }
+      if (matchingFaceIds.size === 0) {
+        showUvToast(`"${activeMaterialAsset.name}" no tiene caras asignadas en este objeto`);
+        return;
+      }
+      if (objectId && onSelectFacesByMaterial) {
+        onSelectFacesByMaterial(objectId, activeMaterialAsset.id);
+      }
+      setSelection({
+        ...createEmptyUVSelection('face'),
+        selectedFaceIds: matchingFaceIds,
+      });
+      if (onSync3DSelection) {
+        onSync3DSelection('face', matchingFaceIds, true);
+      }
+      showUvToast(
+        `${matchingFaceIds.size} cara(s) de "${activeMaterialAsset.name}" seleccionadas`,
+      );
+    };
+
+    const handleConfirmPbrImport = (payload: {
+      mode: 'create' | 'update';
+      name: string;
+      maps: Partial<Record<PbrChannelId, PbrImportedTexture | null>>;
+      assignScope: PbrAssignScope;
+    }) => {
+      if (payload.mode === 'update' && activeMaterialAsset && onUpdateMaterial) {
+        const matPatch = buildPbrMaterialPayload(
+          activeMaterialAsset,
+          payload.name,
+          payload.maps,
+        );
+        onUpdateMaterial(activeMaterialAsset.id, matPatch);
+        setActive2DTextureChannel('auto');
+        showUvToast(`Material PBR "${matPatch.name}" actualizado`);
+        return;
+      }
+
+      if (onCreateMaterial) {
+        const matPayload = buildPbrMaterialPayload(null, payload.name, payload.maps);
+        const assignPrimaryOnCreate = payload.assignScope === 'object' && Boolean(objectId);
+        const created = onCreateMaterial(matPayload, assignPrimaryOnCreate);
+        setSelectedMaterialId(created.id);
+        setActive2DTextureChannel('auto');
+        if (
+          payload.assignScope === 'faces' &&
+          objectId &&
+          selectedFaceIds.size > 0 &&
+          onAssignMaterialToFaces
+        ) {
+          onAssignMaterialToFaces(objectId, selectedFaceIds, created.id);
+        }
+        showUvToast(`Material PBR "${created.name}" importado`);
+        return;
+      }
+
+      if (activeMaterialAsset && onUpdateMaterial) {
+        const matPatch = buildPbrMaterialPayload(
+          activeMaterialAsset,
+          payload.name,
+          payload.maps,
+        );
+        onUpdateMaterial(activeMaterialAsset.id, matPatch);
+        setActive2DTextureChannel('auto');
+        showUvToast(`Material PBR "${matPatch.name}" actualizado`);
+      }
+    };
 
     const commitWithMutation = (mutator: (draft: EditableMesh) => void) => {
       if (!isEditingMode || !activeMesh) return;
@@ -655,34 +903,233 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
         <input
           ref={textureInputRef}
           type="file"
-          accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+          accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
           className="hidden"
           aria-label="Importar imagen de textura"
           onChange={handleTextureFileChange}
+        />
+
+        <PbrMaterialImportModal
+          isOpen={pbrModalOpen}
+          activeMaterial={activeMaterialAsset}
+          hasSelectedObject={Boolean(objectId)}
+          selectedFaceCount={selectedFaceIds.size}
+          onClose={() => setPbrModalOpen(false)}
+          onConfirm={handleConfirmPbrImport}
         />
 
         {/* Workspace: vertical tools and two synchronized viewports */}
         <div className="relative flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
           {toolbarVisible && (
             <aside
-              inert={!isEditingMode}
-              aria-disabled={!isEditingMode}
               aria-label="Herramientas UV y ajustes"
-              className={`w-full md:w-60 lg:w-64 min-h-0 shrink-0 bg-[#16181d] border-b md:border-b-0 md:border-r border-[#2b2e36] p-3 flex flex-col gap-3 overflow-y-auto cad-scroll max-h-[30vh] md:max-h-none ${
-                !isEditingMode ? 'opacity-55' : ''
-              }`}
+              className="w-full md:w-60 lg:w-64 min-h-0 shrink-0 bg-[#16181d] border-b md:border-b-0 md:border-r border-[#2b2e36] p-3 flex flex-col gap-3 overflow-y-auto cad-scroll max-h-[30vh] md:max-h-none"
             >
+              {/* Material Selector, Multi-Material Slots & PBR Import (always interactive) */}
+              <section
+                data-testid="uv-material-panel"
+                className="rounded-lg bg-[#1c1f26] border border-[#2b2e36] p-2.5 space-y-2"
+              >
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-[#9ca3af]">
+                    <Palette className="w-3.5 h-3.5 text-[#5ecd6e]" />
+                    <span>Materiales y PBR</span>
+                  </span>
+                  {assignedSlots.length > 1 && (
+                    <span className="text-[10px] font-semibold text-[#38bdf8]">
+                      {assignedSlots.length} zonas
+                    </span>
+                  )}
+                </div>
+
+                {effectiveMaterials.length > 0 && activeMaterialAsset ? (
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className="w-5 h-5 rounded border border-[#3a3f4b] shrink-0"
+                      style={{ backgroundColor: activeMaterialAsset.baseColor }}
+                    />
+                    <select
+                      aria-label="Seleccionar material activo en LOOPA UVs"
+                      data-testid="uv-material-selector"
+                      value={activeMaterialAsset.id}
+                      onChange={(e) => {
+                        setSelectedMaterialId(e.target.value);
+                        setActive2DTextureChannel('auto');
+                      }}
+                      className="flex-1 min-w-0 h-8 px-2 rounded bg-[#121418] border border-[#323640] text-[11px] font-semibold text-[#f3f4f6] outline-none focus:border-[#5ecd6e]"
+                    >
+                      {assignedSlots.length > 0 && (
+                        <optgroup label="Asignados al objeto">
+                          {assignedSlots.map(({ material, faceCount, isPrimary }) => (
+                            <option key={material.id} value={material.id}>
+                              {material.name} ({isPrimary ? 'Principal · ' : ''}
+                              {faceCount} {faceCount === 1 ? 'cara' : 'caras'})
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {libraryOnlyMaterials.length > 0 && (
+                        <optgroup label="Librería (LOOPA Materials)">
+                          {libraryOnlyMaterials.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-[#9ca3af]">
+                    Sin materiales disponibles en el proyecto.
+                  </div>
+                )}
+
+                {isPreviewingUnassignedMaterial && activeMaterialAsset && (
+                  <div className="text-[10px] text-[#fbbf24] bg-[#221c14] border border-[#f59e0b]/40 rounded px-2 py-1">
+                    Previsualizando &ldquo;{activeMaterialAsset.name}&rdquo; sin sobrescribir asignaciones.
+                  </div>
+                )}
+
+                {/* PBR Channel Status Indicators */}
+                {activeMaterialAsset && (
+                  <div className="space-y-1.5">
+                    <div
+                      data-testid="uv-pbr-channel-badges"
+                      className="grid grid-cols-3 gap-1"
+                    >
+                      {PBR_CHANNEL_IDS.map((ch) => {
+                        const status = pbrChannels[ch];
+                        return (
+                          <button
+                            key={ch}
+                            type="button"
+                            disabled={!status.loaded}
+                            onClick={() => {
+                              if (status.loaded) {
+                                setActive2DTextureChannel(ch);
+                              }
+                            }}
+                            title={
+                              status.loaded
+                                ? `${status.spec.label}: ${status.textureName} (${status.spec.colorSpaceLabel})`
+                                : `${status.spec.label}: No cargado`
+                            }
+                            className={`h-6 px-1.5 rounded border text-[10px] font-medium flex items-center justify-center gap-1 truncate transition-colors ${
+                              status.loaded
+                                ? active2DTextureUrl === status.dataUrl
+                                  ? 'bg-[#16261a] border-[#5ecd6e] text-[#7def8e]'
+                                  : 'bg-[#1a222b] border-[#38bdf8]/45 text-[#cbd5e1] hover:border-[#38bdf8]'
+                                : 'bg-[#14161b] border-[#262a34] text-[#6b7280] opacity-65'
+                            }`}
+                          >
+                            {status.loaded && (
+                              <CheckCircle2 className="w-2.5 h-2.5 text-[#5ecd6e] shrink-0" />
+                            )}
+                            <span className="truncate">{status.spec.shortLabel}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {loadedPbrChannels.length > 0 && (
+                      <label className="flex items-center justify-between gap-1.5 text-[10px] text-[#9ca3af]">
+                        <span className="flex items-center gap-1 shrink-0">
+                          <ImageIcon className="w-3 h-3 text-[#38bdf8]" />
+                          Fondo 2D
+                        </span>
+                        <select
+                          aria-label="Mapa visible en el editor UV 2D"
+                          data-testid="uv-2d-texture-channel"
+                          value={active2DTextureChannel}
+                          onChange={(e) =>
+                            setActive2DTextureChannel(
+                              e.target.value as 'auto' | PbrChannelId | 'none',
+                            )
+                          }
+                          className="h-7 px-1.5 rounded bg-[#121418] border border-[#323640] text-[10px] text-[#e4e6eb] max-w-[130px]"
+                        >
+                          <option value="auto">Automático</option>
+                          {loadedPbrChannels.map((ch) => (
+                            <option key={ch} value={ch}>
+                              {PBR_CHANNEL_SPECS[ch].shortLabel}
+                            </option>
+                          ))}
+                          <option value="none">Sin textura</option>
+                        </select>
+                      </label>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  data-testid="uv-import-pbr-btn"
+                  onClick={() => setPbrModalOpen(true)}
+                  className="w-full h-8 px-2.5 rounded bg-[#16261a] hover:bg-[#1e3322] border border-[#5ecd6e]/60 text-[11px] font-semibold text-[#7def8e] flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  Importar material PBR
+                </button>
+
+                {activeMaterialAsset && objectId && (
+                  <div className="grid grid-cols-2 gap-1">
+                    {onAssignMaterialToObjects && (
+                      <button
+                        type="button"
+                        data-testid="uv-assign-material-object"
+                        onClick={() =>
+                          onAssignMaterialToObjects([objectId], activeMaterialAsset.id)
+                        }
+                        className="h-7 px-1.5 rounded bg-[#22252d] hover:bg-[#2c313b] border border-[#323640] text-[10px] font-semibold text-[#e4e6eb] truncate"
+                        title="Asignar este material como principal del objeto"
+                      >
+                        Asignar objeto
+                      </button>
+                    )}
+                    {onAssignMaterialToFaces && (
+                      <button
+                        type="button"
+                        data-testid="uv-assign-material-faces"
+                        disabled={selectedFaceIds.size === 0}
+                        onClick={() =>
+                          onAssignMaterialToFaces(
+                            objectId,
+                            selectedFaceIds,
+                            activeMaterialAsset.id,
+                          )
+                        }
+                        className="h-7 px-1.5 rounded bg-[#22252d] hover:bg-[#2c313b] disabled:opacity-40 border border-[#323640] text-[10px] font-semibold text-[#e4e6eb] truncate"
+                        title="Asignar este material solo a las caras seleccionadas"
+                      >
+                        Asignar caras ({selectedFaceIds.size})
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      data-testid="uv-select-material-faces"
+                      disabled={(activeSlotInfo?.faceCount ?? 0) === 0}
+                      onClick={handleSelectMaterialFaces}
+                      className="col-span-2 h-7 px-2 rounded bg-[#20232b] hover:bg-[#2a2f3a] disabled:opacity-40 border border-[#2e3340] text-[10px] font-semibold text-[#7dd3fc] truncate"
+                      title="Seleccionar y resaltar en 2D/3D las caras de este material"
+                    >
+                      Sel. caras de este material ({activeSlotInfo?.faceCount ?? 0})
+                    </button>
+                  </div>
+                )}
+              </section>
+
               <div
                 inert={!isEditingMode}
                 aria-disabled={!isEditingMode}
-                className={!isEditingMode ? 'opacity-55' : ''}
+                className={`space-y-3 ${!isEditingMode ? 'opacity-55' : ''}`}
               >
                 <UVToolToolbar
                   objectName={objectName}
                   multiSelectMode={multiSelectMode}
                   keepConnected={keepConnected}
                   showChecker={showChecker}
-                  textureName={materialAsset?.textureName}
+                  textureName={activeMaterialAsset?.textureName}
                   selectionMode={selection.mode}
                   uvSubMode={uvSubMode}
                   screenModifiers={uvScreenModifiers}
@@ -690,7 +1137,7 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
                   boxSelectActive={boxSelectActive}
                   zoomPercent={zoomPercent}
                   onImportTexture={
-                    materialAsset && onUpdateMaterial ? handleImportTexture : undefined
+                    activeMaterialAsset && onUpdateMaterial ? handleImportTexture : undefined
                   }
                   canWeldUV={canWeldUV}
                   onUnwrap={handleUnwrap}
@@ -720,7 +1167,6 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
                   onSyncFrom3D={handleSyncFrom3D}
                   onSyncTo3D={onSync3DSelection ? handleSyncTo3D : undefined}
                 />
-              </div>
 
               {/* Pivot Configuration */}
               <div className="rounded-lg bg-[#1c1f26] border border-[#2b2e36] p-2.5 space-y-2">
@@ -957,6 +1403,7 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
                   </button>
                 </div>
               </div>
+              </div>
 
               {/* Additional actions and suite handoff */}
               <div className="mt-auto pt-2 border-t border-[#272b34] space-y-1.5">
@@ -1008,7 +1455,7 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
                   boxSelectActive={boxSelectActive}
                   placeCursorMode={placeCursorMode}
                   showChecker={showChecker}
-                  textureDataUrl={materialAsset?.textureDataUrl}
+                  textureDataUrl={active2DTextureUrl}
                   uvSubMode={uvSubMode}
                   screenModifiers={uvScreenModifiers}
                   onZoomChange={setZoomPercent}
@@ -1060,7 +1507,11 @@ export const UVWorkspace = forwardRef<UVWorkspaceHandle, UVWorkspaceProps>(
                 objectName={objectName}
                 mesh={activeMesh}
                 objectTransform={objectTransform}
-                materialAsset={materialAsset}
+                materialAsset={activeMaterialAsset}
+                materials={effectiveMaterials}
+                objectPrimaryMaterialId={objectPrimaryMaterialId ?? materialAsset?.id ?? null}
+                activeMaterialId={activeMaterialAsset?.id ?? null}
+                previewUnassignedMaterial={isPreviewingUnassignedMaterial}
                 shading={shading}
                 showChecker={showChecker}
                 uvSelection={selection}

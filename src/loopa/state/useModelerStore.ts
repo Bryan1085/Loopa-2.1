@@ -1887,13 +1887,59 @@ export function useModelerStore() {
 
   /**
    * LOOPA Ecosystem: put the viewport in the work mode an app needs.
-   * Sculpt needs a sculptable mesh: keeps the selected one or picks the first
-   * visible, unlocked mesh in the active scene.
+   * Sculpt needs a sculptable mesh; UVs enters Edit Mode automatically when an
+   * editable mesh is available.
    */
   const enterAppWorkMode = useCallback(
-    (app: 'modeler' | 'sculpt'): boolean => {
+    (app: 'modeler' | 'sculpt' | 'uvs'): boolean => {
       if (app === 'modeler') {
         if (workMode === 'sculpt') toggleWorkMode('object');
+        return true;
+      }
+      if (app === 'uvs') {
+        const target =
+          selectedObject &&
+          isEditableMeshObject(selectedObject) &&
+          !selectedObject.locked
+            ? selectedObject
+            : activeObjects.find(
+                (o) => isEditableMeshObject(o) && !o.locked && o.visible !== false,
+              ) ??
+              activeObjects.find(
+                (o) => isEditableMeshObject(o) && !o.locked,
+              );
+
+        setOperatorSession(null);
+        setModalTransform(null);
+        setModalCancelNonce((n) => n + 1);
+        releaseScreenModifiers();
+
+        if (!target) {
+          setSelectedComponentIds(new Set());
+          setWorkMode('object');
+          return false;
+        }
+
+        setSingleSelectedObject(target.id);
+        const saved = savedEditSelectionsRef.current.get(target.id);
+        if (saved && saved.ids.length > 0) {
+          const mesh = EditableMesh.fromJSON(target.mesh);
+          const validIds = new Set<string>();
+          for (const id of saved.ids) {
+            const exists =
+              saved.mode === 'vertex'
+                ? Boolean(mesh.getVertex(id))
+                : saved.mode === 'edge'
+                  ? Boolean(mesh.getEdge(id))
+                  : Boolean(mesh.getFace(id));
+            if (exists) validIds.add(id);
+          }
+          setEditSelectionMode(saved.mode);
+          setSelectedComponentIds(validIds);
+        } else {
+          setSelectedComponentIds(new Set());
+        }
+        setWorkMode('edit');
         return true;
       }
       if (workMode === 'sculpt') return true;

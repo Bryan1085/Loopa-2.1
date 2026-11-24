@@ -2737,17 +2737,17 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                 {!isCollapsed && node.type === "image_texture" && (
                   <div className="space-y-1.5">
                     <label className="block space-y-1 text-[10px] text-[#aeb4c0]">
-                      Imagen base (PNG o JPEG)
+                      Imagen base (PNG, JPEG o WEBP)
                       <input
                         type="file"
-                        accept="image/png,image/jpeg"
+                        accept="image/png,image/jpeg,image/webp"
                         aria-label="Cargar imagen para el nodo Image Texture"
                         onPointerDown={onBeginEdit}
                         onChange={(event) => {
                           const file = event.target.files?.[0];
                           if (!file) return;
-                          if (!/^image\/(?:png|jpeg)$/i.test(file.type)) {
-                            setFileError("Selecciona una imagen PNG o JPEG.");
+                          if (!/^image\/(?:png|jpeg|webp)$/i.test(file.type)) {
+                            setFileError("Selecciona una imagen PNG, JPEG o WEBP.");
                             event.currentTarget.value = "";
                             return;
                           }

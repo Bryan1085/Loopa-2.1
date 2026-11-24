@@ -109,7 +109,7 @@ export function createMaterialAsset(
   }
   if (
     typeof partial?.textureDataUrl === 'string' &&
-    /^data:image\/(?:png|jpeg);base64,/i.test(partial.textureDataUrl)
+    /^data:image\/(?:png|jpeg|webp);base64,/i.test(partial.textureDataUrl)
   ) {
     asset.textureDataUrl = partial.textureDataUrl;
   }
