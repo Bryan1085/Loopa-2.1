@@ -1468,7 +1468,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         </div>
                         {adaptiveGeometryBudgets && (
                           <div className="text-[10px] text-[#8e95a2]">
-                            Presupuesto actual: {adaptiveGeometryBudgets.budgetMB} MB · Máx. recomendado{' '}
+                            Presupuesto actual: {adaptiveGeometryBudgets.deviceBudgetMB} MB · Máx. recomendado{' '}
                             {adaptiveGeometryBudgets.recommendedMaxFaces.toLocaleString()} caras
                           </div>
                         )}

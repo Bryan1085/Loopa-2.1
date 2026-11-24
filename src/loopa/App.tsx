@@ -23,6 +23,7 @@ import { ProjectGallery } from './components/ProjectGallery';
 import { ProjectModal, ProjectModalMode } from './components/ProjectModal';
 import { MaterialNodeViewport } from './components/MaterialNodeViewport';
 import { MaterialWorkspaceSplit } from './components/MaterialWorkspaceSplit';
+import { SculptDualViewportSplit } from './components/SculptDualViewportSplit';
 import { SettingsModal, SettingsTabId } from './components/SettingsModal';
 import { TimelapseModal } from './components/TimelapseModal';
 import { SceneStatsInfo, TopBar, WorkspaceId } from './components/TopBar';
@@ -69,6 +70,7 @@ import {
   ReferenceImageOrientation,
   SceneObjectData,
   TouchModifierState,
+  ViewportDisplayMode,
   WorkMode,
 } from './core/project/types';
 import { getAppDocumentTitle } from './config/brand';
@@ -177,7 +179,12 @@ export default function App() {
   } | null>(null);
   const [effectiveModifiers, setEffectiveModifiers] =
     useState<TouchModifierState>(EMPTY_MODIFIER_STATE);
+  const [materialNodeEffectiveMods, setMaterialNodeEffectiveMods] =
+    useState<TouchModifierState>(EMPTY_MODIFIER_STATE);
+  const [sculptSecondViewportVisible, setSculptSecondViewportVisible] =
+    useState(true);
   const viewportRef = useRef<Viewport3DHandle | null>(null);
+  const secondaryViewportRef = useRef<Viewport3DHandle | null>(null);
   const uvWorkspaceRef = useRef<UVWorkspaceHandle | null>(null);
   const [uvQuickState, setUvQuickState] = useState<UVQuickAccessState | null>(
     null,
@@ -246,6 +253,34 @@ export default function App() {
   useEffect(() => {
     store.setModelerActive(activeView !== 'gallery');
   }, [activeView, store.setModelerActive]);
+
+  const modelerDisplayModeBeforeMaterialsRef =
+    useRef<ViewportDisplayMode | null>(null);
+  const storeDisplayModeRef = useRef(store.settings.displayMode);
+  storeDisplayModeRef.current = store.settings.displayMode;
+  const setDisplayModeRef = useRef(store.setDisplayMode);
+  setDisplayModeRef.current = store.setDisplayMode;
+  const prevActiveViewForDisplayRef = useRef(activeView);
+
+  useEffect(() => {
+    const prev = prevActiveViewForDisplayRef.current;
+    prevActiveViewForDisplayRef.current = activeView;
+    if (activeView === 'materials' && prev !== 'materials') {
+      if (modelerDisplayModeBeforeMaterialsRef.current === null) {
+        modelerDisplayModeBeforeMaterialsRef.current =
+          storeDisplayModeRef.current;
+      }
+      if (storeDisplayModeRef.current !== 'material') {
+        setDisplayModeRef.current('material');
+      }
+    } else if (prev === 'materials' && activeView !== 'materials') {
+      const savedMode = modelerDisplayModeBeforeMaterialsRef.current;
+      modelerDisplayModeBeforeMaterialsRef.current = null;
+      if (savedMode && storeDisplayModeRef.current !== savedMode) {
+        setDisplayModeRef.current(savedMode);
+      }
+    }
+  }, [activeView]);
 
   useEffect(() => {
     document.title = getAppDocumentTitle();
@@ -1533,6 +1568,18 @@ export default function App() {
   const isViewportVisible =
     activeView === 'layout' || activeView === 'materials';
 
+  const combinedEffectiveModifiers = useMemo<TouchModifierState>(
+    () =>
+      activeView === 'materials'
+        ? {
+            shift: materialNodeEffectiveMods.shift || effectiveModifiers.shift,
+            ctrl: materialNodeEffectiveMods.ctrl || effectiveModifiers.ctrl,
+            alt: materialNodeEffectiveMods.alt || effectiveModifiers.alt,
+          }
+        : effectiveModifiers,
+    [activeView, effectiveModifiers, materialNodeEffectiveMods],
+  );
+
   const radialBoundsClass = useMemo(() => {
     if (activeView === 'layout') {
       const leftClass =
@@ -2026,13 +2073,164 @@ export default function App() {
               onPushMaterialHistory={store.pushMaterialHistorySnapshot}
               onUpdateMaterial={store.updateMaterial}
               screenModifiers={store.screenModifiers}
+              onEffectiveModifiersChange={setMaterialNodeEffectiveMods}
               onUndo={() => store.undo(true)}
               onRedo={() => store.redo(true)}
             />
           }
         >
+        <SculptDualViewportSplit
+          enabled={activeView === 'layout' && store.workMode === 'sculpt'}
+          secondVisible={sculptSecondViewportVisible}
+          onSecondVisibleChange={setSculptSecondViewportVisible}
+          reserveTopLeftCorner={!toolbarPrefs.barhomeVisible}
+          reserveTopLeftWrench={toolbarPrefs.leftToolbarMode === 'hidden'}
+          secondary={
+            <Viewport3D
+              ref={secondaryViewportRef}
+              initialCameraPosition={[-5.6, -6.2, 3.6]}
+              viewportProfile="modeler"
+              viewportLabel="Visor 2"
+              reserveTopLeftCorner={false}
+              reserveTopLeftWrench={false}
+              allowModifierComboMenus={false}
+              objects={store.renderedObjects}
+              materials={store.materials}
+              selectedObject={store.selectedObject}
+              selectedObjectId={store.selectedObjectId}
+              selectedObjectIds={store.selectedObjectIds}
+              workMode={store.workMode}
+              editSelectionMode={store.editSelectionMode}
+              edgeSelectionTool={store.edgeSelectionTool}
+              selectedComponentIds={store.selectedComponentIds}
+              activeTool={store.activeTool}
+              axisConstraint={store.axisConstraint}
+              projection={store.projection}
+              cameraRotationLocked={store.cameraRotationLocked}
+              settings={store.settings}
+              meshRevision={store.meshRevision}
+              toastMessage={null}
+              screenShiftActive={store.screenShiftActive}
+              screenModifiers={store.screenModifiers}
+              operatorSession={store.operatorSession}
+              operatorMergedCount={store.operatorMergedCount}
+              operatorError={store.operatorError}
+              operatorStatusMessage={store.operatorStatusMessage}
+              operatorEffectiveMode={store.operatorEffectiveMode}
+              loopCutPreviewSegments={store.loopCutPreviewSegments}
+              loopCutRingEdgeIds={store.loopCutRingEdgeIds}
+              loopCutFaceIds={store.loopCutFaceIds}
+              loopCutIsClosed={store.loopCutIsClosed}
+              loopCutError={store.loopCutError}
+              canUndo={store.canUndo}
+              canRedo={store.canRedo}
+              onSelectObject={store.selectObject}
+              onBoxSelectObjects={store.selectObjectsFromBox}
+              onSelectComponent={store.selectComponentFromViewport}
+              onBoxSelectComponents={store.selectComponentsFromBox}
+              onPickLoopCutEdge={store.pickLoopCutEdge}
+              onTwoFingerUndo={() => store.undo(true)}
+              onThreeFingerRedo={() => store.redo(true)}
+              onUndo={() => store.undo()}
+              onRedo={() => store.redo()}
+              onLiveObjectTransform={handleLiveObjectTransform}
+              onCommitObjectTransform={handleCommitObjectTransform}
+              onCommitObjectTransforms={handleCommitObjectTransforms}
+              onCommitMeshEdit={store.commitMeshEditFromGizmo}
+              sculptSettings={store.sculptSettings}
+              onLiveSculptStroke={(id, nextMesh) => {
+                viewportRef.current?.syncLiveMeshPreview(id, nextMesh);
+              }}
+              onCommitSculptStroke={store.commitSculptStroke}
+              onUpdateOperatorConfig={store.updateOperatorConfig}
+              onConfirmOperator={store.confirmEditOperator}
+              onCancelOperator={store.cancelEditOperator}
+              onChangeAxisConstraint={store.setAxisConstraint}
+              onToggleProjection={store.setProjection}
+              onToggleXray={store.toggleXrayDisplayMode}
+              onToggleFaceOrientation={store.toggleFaceOrientation}
+              onToggleGrid={() =>
+                store.updateSettings({ showGrid: !store.settings.showGrid })
+              }
+              onToggleMultiSelectTouch={() =>
+                store.updateSettings({
+                  multiSelectTouch: !store.settings.multiSelectTouch,
+                })
+              }
+              onToggleScreenShift={store.toggleScreenShift}
+              onReleaseScreenModifiers={store.releaseScreenModifiers}
+              onUpdateTouchSettings={store.updateTouchSettings}
+              onUpdateRadialSlot={store.updateRadialSlot}
+              onResetRadialSlot={store.resetRadialSlot}
+              onResetRadialLayout={store.resetRadialLayout}
+              onAddPrimitive={(type, options) => store.addPrimitive(type, options)}
+              onSelectTool={(tool) => {
+                if (store.operatorSession) store.cancelEditOperator();
+                store.setActiveTool(tool);
+              }}
+              onDuplicateObject={store.duplicateSelectedObject}
+              onApplyObjectTransform={store.applyObjectTransform}
+              onCenterObjectOrigin={store.centerObjectOrigin}
+              onSeparateSelectedGeometry={store.separateSelectedGeometry}
+              onHideObject={store.toggleObjectVisibility}
+              onDeleteObject={store.deleteSelectedObjects}
+              onToggleWorkMode={store.toggleWorkMode}
+              onChangeEditSelectionMode={store.changeEditSelectionMode}
+              onChangeEdgeSelectionTool={store.setEdgeSelectionTool}
+              onSelectEdgeTopology={store.selectEdgeTopology}
+              onSelectAll={store.selectAllEditComponents}
+              onDeselectAll={store.deselectAllEditComponents}
+              onMarkSeams={store.markSelectedSeams}
+              onSelectSeams={store.selectSeams}
+              onDeselectSeams={store.deselectSeams}
+              onStartOperator={store.startEditOperator}
+              onSwitchMergeOperator={store.switchMergeOperator}
+              onFillSelection={store.executeFillSelection}
+              onConnectVertexPath={store.executeConnectVertexPath}
+              onRecalculateOutside={store.executeRecalculateOutside}
+              onFlipNormals={store.executeFlipNormals}
+              onQuickDissolve={store.executeQuickDissolve}
+              onExecuteContextualDelete={store.executeContextualDelete}
+              onToggleProportional={store.toggleProportionalEditing}
+              onToggleProportionalConnected={store.toggleProportionalConnected}
+              onChangeProportionalRadius={store.setProportionalRadius}
+              onSaveProject={() => {
+                void store.saveProject();
+              }}
+              onOpenSettings={() => setSettingsModalTab('touch')}
+              modalTransform={store.modalTransform}
+              modalCancelNonce={store.modalCancelNonce}
+              paused={
+                !isViewportVisible ||
+                Boolean(timelapseTarget) ||
+                !sculptSecondViewportVisible ||
+                store.workMode !== 'sculpt'
+              }
+              onToggleCameraRotationLock={store.toggleCameraRotationLock}
+              onChangeModalClamp={store.setModalTransformClamp}
+              onCancelModalTransform={store.cancelModalTransform}
+              onCompleteModalTransform={store.completeModalTransform}
+              highlightedNgonObjectId={
+                activeNgonSubdivAlert && !activeNgonSubdivAlert.dismissed
+                  ? activeNgonSubdivAlert.objectId
+                  : null
+              }
+              highlightedNgonFaceIds={
+                activeNgonSubdivAlert && !activeNgonSubdivAlert.dismissed
+                  ? activeNgonSubdivAlert.faceIds
+                  : []
+              }
+            />
+          }
+        >
         <Viewport3D
           ref={viewportRef}
+          viewportProfile={activeView === 'materials' ? 'materials' : 'modeler'}
+          viewportLabel={
+            activeView === 'layout' && store.workMode === 'sculpt'
+              ? 'Visor 1'
+              : undefined
+          }
           reserveTopLeftCorner={!toolbarPrefs.barhomeVisible}
           reserveTopLeftWrench={
             activeView === 'layout' && toolbarPrefs.leftToolbarMode === 'hidden'
@@ -2082,6 +2280,15 @@ export default function App() {
           onCommitObjectTransforms={handleCommitObjectTransforms}
           onCommitMeshEdit={store.commitMeshEditFromGizmo}
           sculptSettings={store.sculptSettings}
+          onLiveSculptStroke={(id, nextMesh) => {
+            if (
+              activeView === 'layout' &&
+              store.workMode === 'sculpt' &&
+              sculptSecondViewportVisible
+            ) {
+              secondaryViewportRef.current?.syncLiveMeshPreview(id, nextMesh);
+            }
+          }}
           onCommitSculptStroke={store.commitSculptStroke}
           onUpdateOperatorConfig={store.updateOperatorConfig}
           onConfirmOperator={store.confirmEditOperator}
@@ -2159,6 +2366,7 @@ export default function App() {
               : []
           }
         />
+        </SculptDualViewportSplit>
         </MaterialWorkspaceSplit>
 
         {/* D. LINER: Panel lateral de jerarquía y modificadores */}
@@ -2200,7 +2408,7 @@ export default function App() {
               barhomeVisible={toolbarPrefs.barhomeVisible}
               multiSelectTouch={store.settings.multiSelectTouch}
               screenShiftActive={store.screenShiftActive}
-              effectiveModifiers={effectiveModifiers}
+              effectiveModifiers={combinedEffectiveModifiers}
               screenModifiers={store.screenModifiers}
               onSetModifier={store.setScreenModifier}
               onToggleModifier={store.toggleScreenModifier}

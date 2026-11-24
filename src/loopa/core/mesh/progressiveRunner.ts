@@ -35,6 +35,8 @@ export type ProgressiveRunStatus<T> =
   | { status: 'cancelled' }
   | { status: 'error'; error: string };
 
+export type ProgressiveTaskResult<T> = ProgressiveRunStatus<T>;
+
 export interface ActiveObjectLock {
   taskId: string;
   objectId: string;

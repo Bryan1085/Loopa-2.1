@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, Eye, EyeOff, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, Eye, EyeOff, Plus, Trash2, X } from "lucide-react";
 import {
   areMaterialSocketTypesCompatible,
   connectMaterialNodeSockets,
   getMaterialNodeDefinition,
+  getNodeNumericParamSpec,
   MaterialNodeDefinition,
+  NodeNumericParamSpec,
   evaluateMaterialNodeGraph,
   getNodeCategoryColor,
   MaterialSocketType,
@@ -28,6 +30,7 @@ interface MaterialNodeEditorProps {
   onBeginEdit: () => void;
   variant?: "panel" | "canvas";
   screenModifiers?: TouchModifierState;
+  onEffectiveModifiersChange?: (modifiers: TouchModifierState) => void;
   toolbarStart?: React.ReactNode;
   onUndo?: () => void;
   onRedo?: () => void;
@@ -35,6 +38,7 @@ interface MaterialNodeEditorProps {
 
 const editableNodeTypes: MaterialNodeType[] = [
   "principled_bsdf",
+  "emission",
   "material_output",
   "image_texture",
   "noise_texture",
@@ -84,86 +88,94 @@ function createNode(
             emission: material.emissiveColor ?? "#000000",
             emissionStrength: material.emissiveIntensity ?? 0,
           }
-        : type === "image_texture"
-          ? { dataUrl: "", textureName: "" }
-          : type === "noise_texture"
-            ? {
-                dimensions: "3D",
-                w: 0,
-                scale: 5,
-                detail: 2,
-                roughness: 0.5,
-                lacunarity: 2,
-                offset: 0,
-                distortion: 0,
-                normalize: true,
-              }
-            : type === "voronoi_texture"
+        : type === "emission"
+          ? {
+              color:
+                material.emissiveColor && material.emissiveColor !== "#000000"
+                  ? material.emissiveColor
+                  : "#ffffff",
+              strength: 1,
+            }
+          : type === "image_texture"
+            ? { dataUrl: "", textureName: "" }
+            : type === "noise_texture"
               ? {
                   dimensions: "3D",
-                  feature: "f1",
-                  distanceMetric: "euclidean",
                   w: 0,
                   scale: 5,
-                  detail: 0,
+                  detail: 2,
                   roughness: 0.5,
                   lacunarity: 2,
-                  smoothness: 1,
-                  exponent: 0.5,
-                  randomness: 1,
-                  normalize: false,
+                  offset: 0,
+                  distortion: 0,
+                  normalize: true,
                 }
-              : type === "mapping"
+              : type === "voronoi_texture"
                 ? {
-                    location: [0, 0, 0],
-                    rotation: [0, 0, 0],
-                    scale: [1, 1, 1],
+                    dimensions: "3D",
+                    feature: "f1",
+                    distanceMetric: "euclidean",
+                    w: 0,
+                    scale: 5,
+                    detail: 0,
+                    roughness: 0.5,
+                    lacunarity: 2,
+                    smoothness: 1,
+                    exponent: 0.5,
+                    randomness: 1,
+                    normalize: false,
                   }
-                : type === "normal_map"
-                  ? { strength: 1 }
-                  : type === "bump"
-                    ? { strength: 1, distance: 1 }
-                    : type === "math"
-                      ? { operation: "add", a: 0, b: 0 }
-                      : type === "mix_color"
-                        ? {
-                            factor: 0.5,
-                            colorA: "#000000",
-                            colorB: "#ffffff",
-                          }
-                        : type === "mix_float" || type === "mix_vector"
-                          ? type === "mix_vector"
-                            ? {
-                                operation: "mix",
-                                factor: 0.5,
-                                a: [0, 0, 0],
-                                b: [1, 1, 1],
-                              }
-                            : { operation: "mix", factor: 0.5, a: 0, b: 1 }
-                          : type === "transform"
-                            ? {
-                                location: [0, 0, 0],
-                                rotation: [0, 0, 0],
-                                scale: [1, 1, 1],
-                              }
-                            : type === "value_float"
-                              ? { value: 0.5 }
-                              : type === "value_integer"
-                                ? { value: 0 }
-                                : type === "value_boolean"
-                                  ? { value: false }
-                                  : type === "value_color"
-                                    ? { value: "#ffffff" }
-                                    : type === "value_vector"
-                                      ? { value: [0, 0, 0] }
-                                      : {
-                                          factor: 0.5,
-                                          interpolation: "linear",
-                                          stops: [
-                                            { position: 0, color: "#000000", alpha: 1 },
-                                            { position: 1, color: "#ffffff", alpha: 1 },
-                                          ],
-                                        };
+                : type === "mapping"
+                  ? {
+                      location: [0, 0, 0],
+                      rotation: [0, 0, 0],
+                      scale: [1, 1, 1],
+                    }
+                  : type === "normal_map"
+                    ? { strength: 1 }
+                    : type === "bump"
+                      ? { strength: 1, distance: 1 }
+                      : type === "math"
+                        ? { operation: "add", a: 0, b: 0 }
+                        : type === "mix_color"
+                          ? {
+                              factor: 0.5,
+                              colorA: "#000000",
+                              colorB: "#ffffff",
+                            }
+                          : type === "mix_float" || type === "mix_vector"
+                            ? type === "mix_vector"
+                              ? {
+                                  operation: "mix",
+                                  factor: 0.5,
+                                  a: [0, 0, 0],
+                                  b: [1, 1, 1],
+                                }
+                              : { operation: "mix", factor: 0.5, a: 0, b: 1 }
+                            : type === "transform"
+                              ? {
+                                  location: [0, 0, 0],
+                                  rotation: [0, 0, 0],
+                                  scale: [1, 1, 1],
+                                }
+                              : type === "value_float"
+                                ? { value: 0.5 }
+                                : type === "value_integer"
+                                  ? { value: 0 }
+                                  : type === "value_boolean"
+                                    ? { value: false }
+                                    : type === "value_color"
+                                      ? { value: "#ffffff" }
+                                      : type === "value_vector"
+                                        ? { value: [0, 0, 0] }
+                                        : {
+                                            factor: 0.5,
+                                            interpolation: "linear",
+                                            stops: [
+                                              { position: 0, color: "#000000", alpha: 1 },
+                                              { position: 1, color: "#ffffff", alpha: 1 },
+                                            ],
+                                          };
   return {
     id: createNodeId(graph, type),
     type,
@@ -176,10 +188,17 @@ function getNodeDefinition(type: MaterialNodeType): MaterialNodeDefinition {
   return getMaterialNodeDefinition(type);
 }
 
+function getNodeDisplayTitle(node: MaterialNode): string {
+  const custom = typeof node.label === "string" ? node.label.trim() : "";
+  return custom || getNodeDefinition(node.type).label;
+}
+
 function getNodeDescription(type: MaterialNodeType): string {
   switch (type) {
     case "principled_bsdf":
       return "Shader PBR principal con color, rugosidad y normales.";
+    case "emission":
+      return "Emite luz y color propio sin depender de iluminación externa.";
     case "material_output":
       return "Salida final de superficie para el material 3D.";
     case "image_texture":
@@ -265,6 +284,9 @@ function NodeNumericBar({
   clampMax,
   clampMin,
   connected,
+  numericMode = "text",
+  compact = false,
+  className = "",
   onBeginEdit,
   onChange,
 }: {
@@ -278,11 +300,16 @@ function NodeNumericBar({
   clampMin?: number;
   clampMax?: number;
   connected?: boolean;
+  numericMode?: "text" | "number";
+  compact?: boolean;
+  className?: string;
   onBeginEdit: () => void;
   onChange: (nextValue: number) => void;
 }) {
-  const sliderVal = Math.max(min, Math.min(max, Number.isFinite(value) ? value : min));
+  const safeVal = Number.isFinite(value) ? value : min;
+  const sliderVal = Math.max(min, Math.min(max, safeVal));
   const normalizeValue = (candidate: number) => {
+    if (!Number.isFinite(candidate)) return safeVal;
     let next = candidate;
     if (clampMin !== undefined) next = Math.max(clampMin, next);
     if (clampMax !== undefined) next = Math.min(clampMax, next);
@@ -290,27 +317,46 @@ function NodeNumericBar({
   };
   return (
     <div
-      className={`space-y-1 rounded border border-[#282d38] bg-[#121419] px-1.5 py-1 ${
-        connected ? "opacity-60" : ""
-      }`}
+      className={`space-y-1 rounded border border-[#282d38] bg-[#121419] ${
+        compact ? "px-1 py-1" : "px-1.5 py-1"
+      } ${connected ? "opacity-60" : ""} ${className}`}
       onPointerDown={(event) => event.stopPropagation()}
     >
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-1.5">
         <span className="truncate text-[10px] font-medium text-[#aeb4c0]">
           {label}
           {connected ? " (conectado)" : ""}
         </span>
-        <NumericFieldInput
-          ariaLabel={ariaLabel}
-          value={value}
-          decimals={decimals}
-          disabled={connected}
-          onCommit={(nextValue) => {
-            onBeginEdit();
-            onChange(normalizeValue(nextValue));
-          }}
-          className="h-6 w-14 rounded border border-[#343a46] bg-[#181b22] px-1 text-right text-[10px] font-mono-tabular text-[#f3f4f6] outline-none focus:border-[#5ecd6e] disabled:cursor-not-allowed"
-        />
+        {numericMode === "number" ? (
+          <input
+            type="number"
+            step={step}
+            min={clampMin}
+            max={clampMax}
+            aria-label={ariaLabel}
+            disabled={connected}
+            value={safeVal}
+            onFocus={onBeginEdit}
+            onChange={(event) => onChange(normalizeValue(Number(event.target.value)))}
+            className={`h-6 ${
+              compact ? "w-12" : "w-14"
+            } rounded border border-[#343a46] bg-[#181b22] px-1 text-right text-[10px] font-mono-tabular text-[#f3f4f6] outline-none focus:border-[#5ecd6e] disabled:cursor-not-allowed`}
+          />
+        ) : (
+          <NumericFieldInput
+            ariaLabel={ariaLabel}
+            value={safeVal}
+            decimals={decimals}
+            disabled={connected}
+            onCommit={(nextValue) => {
+              onBeginEdit();
+              onChange(normalizeValue(nextValue));
+            }}
+            className={`h-6 ${
+              compact ? "w-12" : "w-14"
+            } rounded border border-[#343a46] bg-[#181b22] px-1 text-right text-[10px] font-mono-tabular text-[#f3f4f6] outline-none focus:border-[#5ecd6e] disabled:cursor-not-allowed`}
+          />
+        )}
       </div>
       <input
         type="range"
@@ -331,12 +377,71 @@ function NodeNumericBar({
   );
 }
 
+function NodeVectorSliders({
+  legend,
+  ariaPrefix,
+  vector,
+  defaults,
+  spec,
+  connected,
+  onBeginEdit,
+  onChange,
+}: {
+  legend: string;
+  ariaPrefix: string;
+  vector: readonly number[];
+  defaults: readonly [number, number, number];
+  spec: NodeNumericParamSpec;
+  connected?: boolean;
+  onBeginEdit: () => void;
+  onChange: (nextVector: [number, number, number]) => void;
+}) {
+  return (
+    <fieldset className="space-y-1">
+      <legend className="text-[10px] text-[#aeb4c0]">
+        {legend}
+        {connected ? " (conectado)" : ""}
+      </legend>
+      <div className="grid grid-cols-3 gap-1">
+        {(["X", "Y", "Z"] as const).map((axis, index) => (
+          <NodeNumericBar
+            key={axis}
+            label={axis}
+            ariaLabel={`${ariaPrefix} ${axis}`}
+            value={Number(vector[index] ?? defaults[index])}
+            min={spec.min}
+            max={spec.max}
+            step={spec.step}
+            decimals={spec.decimals ?? 2}
+            clampMin={spec.clampMin}
+            clampMax={spec.clampMax}
+            connected={connected}
+            compact
+            onBeginEdit={onBeginEdit}
+            onChange={(nextVal) => {
+              const nextVector: [number, number, number] = [
+                Number(vector[0] ?? defaults[0]),
+                Number(vector[1] ?? defaults[1]),
+                Number(vector[2] ?? defaults[2]),
+              ];
+              nextVector[index] = nextVal;
+              onChange(nextVector);
+            }}
+          />
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function ColorRampControls({
   node,
+  factorConnected,
   onBeginEdit,
   onChange,
 }: {
   node: MaterialNode;
+  factorConnected?: boolean;
   onBeginEdit: () => void;
   onChange: (values: Record<string, MaterialNodeValue>) => void;
 }) {
@@ -397,23 +502,26 @@ function ColorRampControls({
     });
   };
 
+  const factorSpec = getNodeNumericParamSpec("color_ramp", "factor");
+  const posSpec = getNodeNumericParamSpec("color_ramp", "position");
+  const alphaSpec = getNodeNumericParamSpec("color_ramp", "alpha");
+
   return (
     <div className="space-y-2">
-      <label className="block space-y-1 text-[10px] text-[#aeb4c0]">
-        Factor
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          aria-label="Factor Color Ramp"
-          value={Number(node.values.factor ?? 0.5)}
-          onFocus={onBeginEdit}
-          onPointerDown={onBeginEdit}
-          onChange={(event) => onChange({ factor: Number(event.target.value) })}
-          className="h-3 w-full cursor-pointer accent-[#5ecd6e]"
-        />
-      </label>
+      <NodeNumericBar
+        label="Factor"
+        ariaLabel="Factor Color Ramp"
+        value={Number(node.values.factor ?? 0.5)}
+        min={factorSpec.min}
+        max={factorSpec.max}
+        step={factorSpec.step}
+        decimals={factorSpec.decimals}
+        clampMin={factorSpec.clampMin}
+        clampMax={factorSpec.clampMax}
+        connected={factorConnected}
+        onBeginEdit={onBeginEdit}
+        onChange={(val) => onChange({ factor: val })}
+      />
       <div
         aria-label="Vista previa Color Ramp"
         className="h-4 rounded border border-[#343a46]"
@@ -437,69 +545,65 @@ function ColorRampControls({
         {normalizedStops.map((stop, index) => (
           <div
             key={`${index}-${stop.position}`}
-            className="grid grid-cols-[1fr_54px_54px_28px] items-center gap-1.5"
+            className="space-y-1 rounded border border-[#282d38] bg-[#14171e] p-1.5"
           >
-            <label className="space-y-0.5 text-[9px] text-[#8e95a2]">
-              Posición {index + 1}
-              <input
-                type="number"
-                min="0"
-                max="1"
-                step="0.01"
-                aria-label={`Posición ${index + 1} Color Ramp`}
+            <div className="flex items-center justify-between gap-1.5">
+              <label className="flex flex-1 items-center justify-between gap-1.5 text-[9px] text-[#8e95a2]">
+                <span>Parada {index + 1}</span>
+                <input
+                  type="color"
+                  aria-label={`Color parada ${index + 1} Color Ramp`}
+                  value={stop.color}
+                  onPointerDown={onBeginEdit}
+                  onChange={(event) => updateStop(index, { color: event.target.value })}
+                  className="h-6 w-12 cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5"
+                />
+              </label>
+              <button
+                type="button"
+                aria-label={`Eliminar parada ${index + 1} Color Ramp`}
+                disabled={normalizedStops.length <= 2}
+                onClick={() => {
+                  onBeginEdit();
+                  onChange({
+                    stops: normalizedStops.filter((_, stopIndex) => stopIndex !== index),
+                  });
+                }}
+                className="flex h-6 w-6 items-center justify-center rounded text-[#8e95a2] hover:bg-[#292e38] hover:text-[#ff8c8c] disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <Trash2 aria-hidden="true" className="h-3 w-3" />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-1">
+              <NodeNumericBar
+                label={`Pos ${index + 1}`}
+                ariaLabel={`Posición ${index + 1} Color Ramp`}
                 value={stop.position}
-                onFocus={onBeginEdit}
-                onChange={(event) =>
-                  updateStop(index, {
-                    position: Math.max(0, Math.min(1, Number(event.target.value))),
-                  })
-                }
-                className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                min={posSpec.min}
+                max={posSpec.max}
+                step={posSpec.step}
+                decimals={posSpec.decimals}
+                clampMin={posSpec.clampMin}
+                clampMax={posSpec.clampMax}
+                compact
+                onBeginEdit={onBeginEdit}
+                onChange={(val) => updateStop(index, { position: val })}
               />
-            </label>
-            <label className="space-y-0.5 text-[9px] text-[#8e95a2]">
-              Color
-              <input
-                type="color"
-                aria-label={`Color parada ${index + 1} Color Ramp`}
-                value={stop.color}
-                onPointerDown={onBeginEdit}
-                onChange={(event) => updateStop(index, { color: event.target.value })}
-                className="h-7 w-full cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5"
-              />
-            </label>
-            <label className="space-y-0.5 text-[9px] text-[#8e95a2]">
-              Alpha
-              <input
-                type="number"
-                min="0"
-                max="1"
-                step="0.01"
-                aria-label={`Alpha parada ${index + 1} Color Ramp`}
+              <NodeNumericBar
+                label="Alpha"
+                ariaLabel={`Alpha parada ${index + 1} Color Ramp`}
                 value={stop.alpha}
-                onFocus={onBeginEdit}
-                onChange={(event) =>
-                  updateStop(index, {
-                    alpha: Math.max(0, Math.min(1, Number(event.target.value))),
-                  })
-                }
-                className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1 text-[10px] text-[#cbd5e1]"
+                min={alphaSpec.min}
+                max={alphaSpec.max}
+                step={alphaSpec.step}
+                decimals={alphaSpec.decimals}
+                clampMin={alphaSpec.clampMin}
+                clampMax={alphaSpec.clampMax}
+                compact
+                onBeginEdit={onBeginEdit}
+                onChange={(val) => updateStop(index, { alpha: val })}
               />
-            </label>
-            <button
-              type="button"
-              aria-label={`Eliminar parada ${index + 1} Color Ramp`}
-              disabled={normalizedStops.length <= 2}
-              onClick={() => {
-                onBeginEdit();
-                onChange({
-                  stops: normalizedStops.filter((_, stopIndex) => stopIndex !== index),
-                });
-              }}
-              className="mt-4 flex h-7 w-7 items-center justify-center rounded text-[#8e95a2] hover:bg-[#292e38] hover:text-[#ff8c8c] disabled:cursor-not-allowed disabled:opacity-30"
-            >
-              <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
-            </button>
+            </div>
           </div>
         ))}
       </div>
@@ -523,6 +627,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
   onBeginEdit,
   variant = "panel",
   screenModifiers,
+  onEffectiveModifiersChange,
   toolbarStart,
   onUndo,
   onRedo,
@@ -542,6 +647,13 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     ctrl: false,
     alt: false,
   });
+  const [holdModifiers, setHoldModifiers] = useState<TouchModifierState>({
+    shift: false,
+    ctrl: false,
+    alt: false,
+  });
+  const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const [connectionError, setConnectionError] = useState("");
   const [spawnPopup, setSpawnPopup] = useState<{
     fromNodeId: string;
@@ -557,6 +669,13 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     startY: number;
     startTime: number;
     nodeId: string;
+    startedOnTitle: boolean;
+  } | null>(null);
+  const lastTitleTapRef = useRef<{
+    nodeId: string;
+    time: number;
+    clientX: number;
+    clientY: number;
   } | null>(null);
 
   const spawnAndConnectNode = (nodeType: MaterialNodeType) => {
@@ -667,6 +786,9 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
   physicalModifiersRef.current = physicalModifiers;
   const screenModifiersRef = useRef(screenModifiers);
   screenModifiersRef.current = screenModifiers;
+  const holdModifiersRef = useRef(holdModifiers);
+  holdModifiersRef.current = holdModifiers;
+  const holdTimerRef = useRef<number | null>(null);
   const activePointersRef = useRef(new Map<number, { clientX: number; clientY: number }>());
   const multiTouchRef = useRef<{
     maxCount: number;
@@ -675,6 +797,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     prevDist: number;
     totalMidMovement: number;
     totalPinchChange: number;
+    holdActivated: boolean;
   } | null>(null);
   const cutStrokeRef = useRef<{
     pointerId: number;
@@ -704,10 +827,30 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
   } | null>(null);
   const connectionDragRef = useRef<typeof connectionDrag>(null);
   const isCanvas = variant === "canvas";
-  const effectiveShift = physicalModifiers.shift || Boolean(screenModifiers?.shift);
-  const effectiveCtrl = physicalModifiers.ctrl || Boolean(screenModifiers?.ctrl);
+  const effectiveShift =
+    physicalModifiers.shift || Boolean(screenModifiers?.shift) || holdModifiers.shift;
+  const effectiveCtrl =
+    physicalModifiers.ctrl || Boolean(screenModifiers?.ctrl) || holdModifiers.ctrl;
+  const effectiveAlt =
+    physicalModifiers.alt || Boolean(screenModifiers?.alt) || holdModifiers.alt;
   const splitContext = useMaterialWorkspaceSplit();
   const registerInlineToggle = splitContext?.registerInlineToggle;
+
+  const clearHoldTimer = useCallback(() => {
+    if (holdTimerRef.current !== null) {
+      window.clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isCanvas) return;
+    onEffectiveModifiersChange?.({
+      shift: effectiveShift,
+      ctrl: effectiveCtrl,
+      alt: effectiveAlt,
+    });
+  }, [effectiveAlt, effectiveCtrl, effectiveShift, isCanvas, onEffectiveModifiersChange]);
 
   useEffect(() => {
     if (!isCanvas || !registerInlineToggle) return;
@@ -736,6 +879,8 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     };
     const clearModifiers = () => {
       setPhysicalModifiers({ shift: false, ctrl: false, alt: false });
+      setHoldModifiers({ shift: false, ctrl: false, alt: false });
+      clearHoldTimer();
       setSpacePressed(false);
     };
     window.addEventListener("keydown", syncModifiers);
@@ -746,16 +891,17 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
       window.removeEventListener("keyup", syncModifiers);
       window.removeEventListener("blur", clearModifiers);
     };
-  }, [isCanvas]);
+  }, [clearHoldTimer, isCanvas]);
 
   useEffect(() => {
     return () => {
+      clearHoldTimer();
       for (const timer of flashTimersRef.current) {
         window.clearTimeout(timer);
       }
       flashTimersRef.current = [];
     };
-  }, []);
+  }, [clearHoldTimer]);
 
   const getNodePosition = useCallback(
     (node: MaterialNode) => dragPositions?.[node.id] ?? node.position,
@@ -786,6 +932,30 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     plane.querySelectorAll<HTMLElement>("[data-socket-key]").forEach((element) => {
       const key = element.dataset.socketKey;
       if (!key) return;
+      if (element.offsetWidth > 0 && element.offsetHeight > 0) {
+        let ox = element.offsetWidth / 2;
+        let oy = element.offsetHeight / 2;
+        let cur: HTMLElement | null = element;
+        let reachedPlane = false;
+        while (cur && cur !== plane) {
+          const parent = cur.offsetParent as HTMLElement | null;
+          ox += cur.offsetLeft;
+          oy += cur.offsetTop;
+          if (parent === plane) {
+            reachedPlane = true;
+            break;
+          }
+          if (parent) {
+            ox += parent.clientLeft - parent.scrollLeft;
+            oy += parent.clientTop - parent.scrollTop;
+          }
+          cur = parent;
+        }
+        if (reachedPlane) {
+          next[key] = { x: ox, y: oy };
+          return;
+        }
+      }
       const rect = element.getBoundingClientRect();
       next[key] = {
         x: (rect.left + rect.width / 2 - viewportRect.left - pan.x) / zoom,
@@ -799,8 +969,8 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
         keys.every(
           (key) =>
             current[key] &&
-            Math.abs(current[key].x - next[key].x) < 0.5 &&
-            Math.abs(current[key].y - next[key].y) < 0.5,
+            Math.abs(current[key].x - next[key].x) < 0.05 &&
+            Math.abs(current[key].y - next[key].y) < 0.05,
         )
       ) {
         return current;
@@ -820,6 +990,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     graph.nodes,
     isCanvas,
     measureSocketPositions,
+    renamingNodeId,
   ]);
 
   useEffect(() => {
@@ -828,6 +999,9 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     }
     const observer = new ResizeObserver(measureSocketPositions);
     observer.observe(canvasViewportRef.current);
+    if (nodePlaneRef.current) {
+      observer.observe(nodePlaneRef.current);
+    }
     return () => observer.disconnect();
   }, [isCanvas, measureSocketPositions]);
 
@@ -995,6 +1169,44 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     });
   };
 
+  const startNodeRename = (node: MaterialNode) => {
+    setRenamingNodeId(node.id);
+    setRenameDraft(getNodeDisplayTitle(node));
+    setSelectedNodeIds(new Set([node.id]));
+  };
+
+  const commitNodeRename = (nodeId: string, rawDraft?: string) => {
+    const targetNode = graph.nodes.find((node) => node.id === nodeId);
+    setRenamingNodeId(null);
+    if (!targetNode) return;
+    const trimmed = (rawDraft ?? renameDraft).trim();
+    const defaultLabel = getNodeDefinition(targetNode.type).label;
+    const nextLabel = trimmed && trimmed !== defaultLabel ? trimmed : undefined;
+    const prevLabel =
+      typeof targetNode.label === "string" && targetNode.label.trim()
+        ? targetNode.label.trim()
+        : undefined;
+    if (nextLabel === prevLabel) return;
+    onBeginEdit();
+    onChange({
+      ...graph,
+      nodes: graph.nodes.map((node) => {
+        if (node.id !== nodeId) return node;
+        if (nextLabel) {
+          return { ...node, label: nextLabel };
+        }
+        const rest = { ...node };
+        delete rest.label;
+        return rest;
+      }),
+    });
+  };
+
+  const cancelNodeRename = () => {
+    setRenamingNodeId(null);
+    setRenameDraft("");
+  };
+
   const duplicateSelection = (anchorNode?: MaterialNode) => {
     const useMulti =
       selectedNodeIds.size > 1 && (!anchorNode || selectedNodeIds.has(anchorNode.id));
@@ -1065,17 +1277,25 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
 
   const startNodeDrag = (event: React.PointerEvent<HTMLElement>, node: MaterialNode) => {
     if (!isCanvas || event.button !== 0) return;
-    if (event.target instanceof HTMLElement && event.target.closest("button")) {
+    if (
+      event.target instanceof HTMLElement &&
+      event.target.closest("button, input, select, textarea")
+    ) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
+    const startedOnTitle =
+      event.target instanceof HTMLElement
+        ? Boolean(event.target.closest('[data-testid="material-node-title"]'))
+        : false;
     headerPressRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
       startTime: Date.now(),
       nodeId: node.id,
+      startedOnTitle,
     };
     const preserveSelection =
       event.shiftKey ||
@@ -1153,9 +1373,31 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
       const hp = headerPressRef.current;
       if (hp && hp.pointerId === event.pointerId) {
         const movedPx = Math.hypot(event.clientX - hp.startX, event.clientY - hp.startY);
-        const duration = Date.now() - hp.startTime;
+        const now = Date.now();
+        const duration = now - hp.startTime;
         if (movedPx < 6 && duration < 500) {
-          toggleNodeCollapsed(hp.nodeId);
+          if (hp.startedOnTitle) {
+            const prevTitleTap = lastTitleTapRef.current;
+            if (
+              prevTitleTap &&
+              prevTitleTap.nodeId === hp.nodeId &&
+              now - prevTitleTap.time <= 380 &&
+              Math.hypot(event.clientX - prevTitleTap.clientX, event.clientY - prevTitleTap.clientY) <= 24
+            ) {
+              lastTitleTapRef.current = null;
+              const targetNode = graph.nodes.find((n) => n.id === hp.nodeId);
+              if (targetNode) startNodeRename(targetNode);
+            } else {
+              lastTitleTapRef.current = {
+                nodeId: hp.nodeId,
+                time: now,
+                clientX: event.clientX,
+                clientY: event.clientY,
+              };
+            }
+          } else {
+            toggleNodeCollapsed(hp.nodeId);
+          }
         }
       }
     }
@@ -1193,7 +1435,8 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
   const isShiftActiveForEvent = (event?: { shiftKey?: boolean }) =>
     Boolean(event?.shiftKey) ||
     physicalModifiersRef.current.shift ||
-    Boolean(screenModifiersRef.current?.shift);
+    Boolean(screenModifiersRef.current?.shift) ||
+    holdModifiersRef.current.shift;
 
   const spawnCutFlash = (
     hitPoint: Point2D,
@@ -1321,8 +1564,12 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     });
 
     if (activePointersRef.current.size >= 2) {
+      clearHoldTimer();
       navigationRef.current = null;
       emptyTapCandidateRef.current = null;
+      if (holdModifiersRef.current.shift) {
+        setHoldModifiers({ shift: false, ctrl: false, alt: false });
+      }
       if (boxSelectionRef.current) {
         boxSelectionRef.current = null;
         setSelectionBox(null);
@@ -1337,14 +1584,46 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
         y: (pts[0].clientY + pts[1].clientY) / 2,
       };
       const prevDist = Math.hypot(pts[1].clientX - pts[0].clientX, pts[1].clientY - pts[0].clientY);
-      multiTouchRef.current = {
-        maxCount: Math.max(multiTouchRef.current?.maxCount ?? 0, activePointersRef.current.size),
+      const pointerCount = activePointersRef.current.size;
+      const nextMt = {
+        maxCount: Math.max(multiTouchRef.current?.maxCount ?? 0, pointerCount),
         startTime: multiTouchRef.current?.startTime ?? Date.now(),
         prevMid,
         prevDist,
         totalMidMovement: multiTouchRef.current?.totalMidMovement ?? 0,
         totalPinchChange: multiTouchRef.current?.totalPinchChange ?? 0,
+        holdActivated: multiTouchRef.current?.holdActivated ?? false,
       };
+      multiTouchRef.current = nextMt;
+      if (!nextMt.holdActivated) {
+        if (pointerCount === 2) {
+          holdTimerRef.current = window.setTimeout(() => {
+            const mt = multiTouchRef.current;
+            if (
+              activePointersRef.current.size === 2 &&
+              mt &&
+              !mt.holdActivated &&
+              mt.totalMidMovement + mt.totalPinchChange < 10
+            ) {
+              mt.holdActivated = true;
+              setHoldModifiers({ shift: false, ctrl: true, alt: false });
+            }
+          }, 260);
+        } else if (pointerCount >= 3) {
+          holdTimerRef.current = window.setTimeout(() => {
+            const mt = multiTouchRef.current;
+            if (
+              activePointersRef.current.size >= 3 &&
+              mt &&
+              !mt.holdActivated &&
+              mt.totalMidMovement < 12
+            ) {
+              mt.holdActivated = true;
+              setHoldModifiers({ shift: false, ctrl: false, alt: true });
+            }
+          }, 260);
+        }
+      }
       event.preventDefault();
       return;
     }
@@ -1427,6 +1706,38 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
       panX: panRef.current.x,
       panY: panRef.current.y,
     };
+    if (!spacePressed && !shiftActive && event.button === 0) {
+      clearHoldTimer();
+      const holdPointerId = event.pointerId;
+      const holdClientX = event.clientX;
+      const holdClientY = event.clientY;
+      holdTimerRef.current = window.setTimeout(() => {
+        const nav = navigationRef.current;
+        const activePt = activePointersRef.current.get(holdPointerId);
+        if (
+          activePointersRef.current.size === 1 &&
+          nav?.pointerId === holdPointerId &&
+          activePt &&
+          Math.hypot(activePt.clientX - holdClientX, activePt.clientY - holdClientY) < 8
+        ) {
+          emptyTapCandidateRef.current = null;
+          navigationRef.current = null;
+          setHoldModifiers({ shift: true, ctrl: false, alt: false });
+          const canvasPt = clientToCanvas(activePt.clientX, activePt.clientY);
+          cutStrokeRef.current = {
+            pointerId: holdPointerId,
+            startClientX: activePt.clientX,
+            startClientY: activePt.clientY,
+            lastCanvasPoint: canvasPt,
+            points: [canvasPt],
+            historyPushed: false,
+            cutLinkIds: new Set(),
+            pendingFromNodeBody: false,
+          };
+          setCutTrail([canvasPt]);
+        }
+      }, 260);
+    }
     event.currentTarget.setPointerCapture?.(event.pointerId);
   };
 
@@ -1439,20 +1750,24 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     }
 
     if (activePointersRef.current.size >= 2 && multiTouchRef.current) {
+      const pts = Array.from(activePointersRef.current.values());
+      const mt = multiTouchRef.current;
       if (activePointersRef.current.size === 2) {
-        const pts = Array.from(activePointersRef.current.values());
         const mid: Point2D = {
           x: (pts[0].clientX + pts[1].clientX) / 2,
           y: (pts[0].clientY + pts[1].clientY) / 2,
         };
         const dist = Math.hypot(pts[1].clientX - pts[0].clientX, pts[1].clientY - pts[0].clientY);
-        const mt = multiTouchRef.current;
         const dMid = Math.hypot(mid.x - mt.prevMid.x, mid.y - mt.prevMid.y);
         const dDist = Math.abs(dist - mt.prevDist);
         mt.totalMidMovement += dMid;
         mt.totalPinchChange += dDist;
 
-        if (mt.totalMidMovement > 8 || mt.totalPinchChange > 8) {
+        if (mt.totalMidMovement + mt.totalPinchChange >= 10 && !mt.holdActivated) {
+          clearHoldTimer();
+        }
+
+        if (!mt.holdActivated && (mt.totalMidMovement > 8 || mt.totalPinchChange > 8)) {
           const bounds = event.currentTarget.getBoundingClientRect();
           const prevZoom = zoomRef.current;
           const prevPan = panRef.current;
@@ -1472,6 +1787,16 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
 
         mt.prevMid = mid;
         mt.prevDist = dist;
+      } else {
+        const mid: Point2D = {
+          x: pts.reduce((sum, pt) => sum + pt.clientX, 0) / pts.length,
+          y: pts.reduce((sum, pt) => sum + pt.clientY, 0) / pts.length,
+        };
+        mt.totalMidMovement += Math.hypot(mid.x - mt.prevMid.x, mid.y - mt.prevMid.y);
+        mt.prevMid = mid;
+        if (mt.totalMidMovement >= 12 && !mt.holdActivated) {
+          clearHoldTimer();
+        }
       }
       return;
     }
@@ -1529,6 +1854,11 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     const navigation = navigationRef.current;
     if (navigation?.pointerId === event.pointerId) {
       if (
+        Math.hypot(event.clientX - navigation.pointerX, event.clientY - navigation.pointerY) >= 8
+      ) {
+        clearHoldTimer();
+      }
+      if (
         emptyTapCandidateRef.current &&
         Math.hypot(
           event.clientX - emptyTapCandidateRef.current.clientX,
@@ -1561,11 +1891,17 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
 
   const finishCanvasPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     activePointersRef.current.delete(event.pointerId);
+    if (activePointersRef.current.size === 0) {
+      clearHoldTimer();
+    }
 
     const boxSel = boxSelectionRef.current;
     if (boxSel?.pointerId === event.pointerId) {
       boxSelectionRef.current = null;
       setSelectionBox(null);
+      if (activePointersRef.current.size === 0) {
+        setHoldModifiers({ shift: false, ctrl: false, alt: false });
+      }
       event.currentTarget.releasePointerCapture?.(event.pointerId);
       return;
     }
@@ -1577,7 +1913,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
           event.clientX - cut.startClientX,
           event.clientY - cut.startClientY,
         );
-        if (movedPx < 6) {
+        if (movedPx < 6 && !holdModifiersRef.current.shift) {
           cutLinksAlongSegment(cut.lastCanvasPoint, cut.lastCanvasPoint);
         }
       }
@@ -1608,12 +1944,19 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
     if (mt && activePointersRef.current.size === 0) {
       const duration = Date.now() - mt.startTime;
       const totalMotion = mt.totalMidMovement + mt.totalPinchChange;
+      const wasHold = mt.holdActivated;
       multiTouchRef.current = null;
-      if (mt.maxCount === 2 && totalMotion < 14 && duration < 450) {
-        onUndo?.();
-      } else if (mt.maxCount >= 3 && totalMotion < 18 && duration < 500) {
-        onRedo?.();
+      if (!wasHold) {
+        if (mt.maxCount === 2 && totalMotion < 14 && duration < 450) {
+          onUndo?.();
+        } else if (mt.maxCount >= 3 && totalMotion < 18 && duration < 500) {
+          onRedo?.();
+        }
       }
+    }
+
+    if (activePointersRef.current.size === 0) {
+      setHoldModifiers({ shift: false, ctrl: false, alt: false });
     }
 
     const connection = connectionDragRef.current;
@@ -1671,7 +2014,9 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
   const cancelCanvasPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     activePointersRef.current.delete(event.pointerId);
     if (activePointersRef.current.size === 0) {
+      clearHoldTimer();
       multiTouchRef.current = null;
+      setHoldModifiers({ shift: false, ctrl: false, alt: false });
     }
     if (boxSelectionRef.current?.pointerId === event.pointerId) {
       boxSelectionRef.current = null;
@@ -1838,6 +2183,8 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
       data-pan-x={isCanvas ? pan.x : undefined}
       data-pan-y={isCanvas ? pan.y : undefined}
       data-shift-active={isCanvas && effectiveShift ? "true" : "false"}
+      data-ctrl-active={isCanvas && effectiveCtrl ? "true" : "false"}
+      data-alt-active={isCanvas && effectiveAlt ? "true" : "false"}
       tabIndex={isCanvas ? 0 : undefined}
       onPointerDown={isCanvas ? startCanvasPointer : undefined}
       onPointerMove={isCanvas ? moveCanvasPointer : undefined}
@@ -1994,13 +2341,17 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
         )}
           {graph.nodes.map((node) => {
             const definition = getNodeDefinition(node.type);
+            const displayTitle = getNodeDisplayTitle(node);
             const position = getNodePosition(node);
             const categoryColor = getNodeCategoryColor(definition.category);
             const isCollapsed = Boolean(node.collapsed);
+            const isRenaming = renamingNodeId === node.id;
+            const isSocketConnected = (sockId: string) =>
+              graph.links.some((l) => l.toNodeId === node.id && l.toSocket === sockId);
             return (
               <section
                 key={node.id}
-                aria-label={definition.label}
+                aria-label={displayTitle}
                 onClick={(event) => selectNode(event, node.id)}
                 data-testid="material-node-card"
                 data-node-card="true"
@@ -2026,8 +2377,11 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                   onPointerCancel={finishNodeDrag}
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (!isCanvas) {
-                      toggleNodeCollapsed(node.id);
+                    if (!isCanvas && !isRenaming) {
+                      const target = event.target as HTMLElement;
+                      if (!target.closest("button, input, [data-testid='material-node-title']")) {
+                        toggleNodeCollapsed(node.id);
+                      }
                     }
                   }}
                   className={`flex items-center justify-between gap-2 ${
@@ -2036,35 +2390,114 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                       : "border-b border-[#2f3440] pb-1.5"
                   } ${isCanvas ? "cursor-grab touch-none active:cursor-grabbing" : "cursor-pointer"}`}
                 >
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span
-                      aria-hidden="true"
-                      className="flex h-4 w-4 shrink-0 items-center justify-center text-[#8e95a2]"
+                  <div className="flex items-center gap-1 min-w-0 flex-1">
+                    <button
+                      type="button"
+                      data-testid="material-node-collapse-btn"
+                      aria-label={
+                        isCollapsed
+                          ? `Expandir nodo ${displayTitle}`
+                          : `Contraer nodo ${displayTitle}`
+                      }
+                      title={isCollapsed ? "Expandir nodo" : "Contraer nodo"}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleNodeCollapsed(node.id);
+                      }}
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[#8e95a2] hover:bg-[#292e38] hover:text-[#d7dbe3]"
                     >
                       {isCollapsed ? (
                         <ChevronRight className="h-3.5 w-3.5" />
                       ) : (
                         <ChevronDown className="h-3.5 w-3.5" />
                       )}
-                    </span>
-                    <h3 className="text-[10px] font-bold uppercase tracking-wide text-[#d7dbe3] truncate">
-                      {definition.label}
-                    </h3>
+                    </button>
+                    {isRenaming ? (
+                      <div
+                        className="flex min-w-0 flex-1 items-center gap-1"
+                        onPointerDown={(event) => event.stopPropagation()}
+                      >
+                        <input
+                          type="text"
+                          aria-label={`Renombrar nodo ${displayTitle}`}
+                          data-testid="material-node-rename-input"
+                          value={renameDraft}
+                          autoFocus
+                          onChange={(event) => setRenameDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              commitNodeRename(node.id, event.currentTarget.value);
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelNodeRename();
+                            }
+                          }}
+                          className="h-6 min-w-0 flex-1 rounded border border-[#5ecd6e] bg-[#121418] px-1.5 text-[10px] font-bold text-[#f3f4f6] outline-none"
+                        />
+                        <button
+                          type="button"
+                          aria-label="Confirmar nombre del nodo"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            commitNodeRename(node.id);
+                          }}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-[#213626] text-[#5ecd6e] hover:bg-[#2a4731]"
+                        >
+                          <Check className="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Cancelar renombrado"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            cancelNodeRename();
+                          }}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[#8e95a2] hover:bg-[#292e38] hover:text-[#ff8c8c]"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ) : (
+                      <h3
+                        data-testid="material-node-title"
+                        title="Toca para seleccionar · Doble toque para renombrar"
+                        onDoubleClick={(event) => {
+                          event.stopPropagation();
+                          lastTitleTapRef.current = null;
+                          startNodeRename(node);
+                        }}
+                        className="text-[10px] font-bold uppercase tracking-wide text-[#d7dbe3] truncate select-none"
+                      >
+                        {displayTitle}
+                      </h3>
+                    )}
                   </div>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-0.5 shrink-0">
                     <button
                       type="button"
-                      aria-label={`Duplicar nodo ${definition.label}`}
-                      onClick={() => duplicateSelection(node)}
-                      className="rounded p-1 text-[#8e95a2] hover:bg-[#292e38] hover:text-[#d7dbe3]"
+                      aria-label={`Duplicar nodo ${displayTitle}`}
+                      title={`Duplicar nodo ${displayTitle}`}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        duplicateSelection(node);
+                      }}
+                      className="flex h-7 w-7 items-center justify-center rounded text-[#8e95a2] hover:bg-[#292e38] hover:text-[#d7dbe3]"
                     >
                       <Copy className="h-3.5 w-3.5" />
                     </button>
                     <button
                       type="button"
-                      aria-label={`Eliminar nodo ${definition.label}`}
-                      onClick={() => removeNode(node.id)}
-                      className="rounded p-1 text-[#8e95a2] hover:bg-[#292e38] hover:text-[#ff8c8c]"
+                      aria-label={`Eliminar nodo ${displayTitle}`}
+                      title={`Eliminar nodo ${displayTitle}`}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        removeNode(node.id);
+                      }}
+                      className="flex h-7 w-7 items-center justify-center rounded text-[#8e95a2] hover:bg-[#292e38] hover:text-[#ff8c8c]"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -2086,7 +2519,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                           )
                           .map((output) => ({
                             value: `${sourceNode.id}::${output.id}`,
-                            label: `${getNodeDefinition(sourceNode.type).label} · ${output.label}`,
+                            label: `${getNodeDisplayTitle(sourceNode)} · ${output.label}`,
                           }));
                       });
                   return (
@@ -2102,7 +2535,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                         data-node-id={node.id}
                         data-socket-id={input.id}
                         data-socket-key={getSocketKey(node.id, input.id, "input")}
-                        aria-label={`Socket de entrada ${definition.label}: ${input.label}`}
+                        aria-label={`Socket de entrada ${displayTitle}: ${input.label}`}
                         title={`${input.label} · ${input.type} (arrastra a una salida)`}
                         className="flex h-5 w-4 shrink-0 items-center justify-center touch-none"
                         onPointerDown={(event) => startConnectionDrag(event, node, input.id, "input")}
@@ -2115,7 +2548,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                       <span className="min-w-0 flex-1 truncate">{input.label}</span>
                       {!isCollapsed && (
                         <select
-                          aria-label={`${definition.label}: ${input.label}`}
+                          aria-label={`${displayTitle}: ${input.label}`}
                           value={link ? `${link.fromNodeId}::${link.fromSocket}` : ""}
                           onFocus={onBeginEdit}
                           onChange={(event) => setInputLink(node, input.id, event.target.value)}
@@ -2134,87 +2567,124 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                 })}
 
                 {!isCollapsed && node.type === "principled_bsdf" && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="col-span-2 flex items-center justify-between gap-2 text-[10px] text-[#aeb4c0]">
-                      Color base
+                  <div className="space-y-1.5">
+                    <label
+                      className={`flex items-center justify-between gap-2 text-[10px] text-[#aeb4c0] ${
+                        isSocketConnected("baseColor") ? "opacity-60" : ""
+                      }`}
+                    >
+                      <span>
+                        Color base
+                        {isSocketConnected("baseColor") ? " (conectado)" : ""}
+                      </span>
                       <input
                         type="color"
                         aria-label="Color base Principled BSDF"
+                        disabled={isSocketConnected("baseColor")}
                         value={String(node.values.baseColor ?? material.baseColor)}
                         onPointerDown={onBeginEdit}
                         onChange={(event) => updateNode(node.id, { baseColor: event.target.value })}
-                        className="h-7 w-14 cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5"
+                        className="h-7 w-14 cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5 disabled:cursor-not-allowed"
                       />
                     </label>
-                    {(
-                      [
-                        ["metallic", "Metallic", 0, 1, 0.01, material.metallic],
-                        ["roughness", "Rugosidad", 0, 1, 0.01, material.roughness],
-                        ["alpha", "Opacidad", 0, 1, 0.01, material.opacity ?? 1],
-                      ] as const
-                    ).map(([key, label, min, max, step, fallback]) => (
-                      <label key={key} className="space-y-1 text-[10px] text-[#aeb4c0]">
-                        {label}
-                        <input
-                          type="number"
-                          min={min}
-                          max={max}
-                          step={step}
-                          aria-label={`${label} Principled BSDF`}
-                          value={Number(node.values[key] ?? fallback)}
-                          onFocus={onBeginEdit}
-                          onChange={(event) =>
-                            updateNode(node.id, {
-                              [key]: Number(event.target.value),
-                            })
-                          }
-                          className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
-                        />
-                      </label>
-                    ))}
-                    {(
-                      [
-                        ["ior", "IOR", 1, 2.5, 0.01, 1.45],
-                        ["specular", "Specular", 0, 1, 0.01, 0.5],
-                        ["emissionStrength", "Emission Strength", 0, 20, 0.1, 0],
-                      ] as const
-                    ).map(([key, label, min, max, step, fallback]) => (
-                      <label key={key} className="space-y-1 text-[10px] text-[#aeb4c0]">
-                        {label}
-                        <input
-                          type="number"
-                          min={min}
-                          max={max}
-                          step={step}
-                          aria-label={label}
-                          value={Number(node.values[key] ?? fallback)}
-                          onFocus={onBeginEdit}
-                          onChange={(event) =>
-                            updateNode(node.id, {
-                              [key]: Number(event.target.value),
-                            })
-                          }
-                          className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
-                        />
-                      </label>
-                    ))}
-                    <label className="col-span-2 flex items-center justify-between gap-2 text-[10px] text-[#aeb4c0]">
-                      Emisión
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(
+                        [
+                          ["metallic", "Metallic", "Metallic Principled BSDF", material.metallic],
+                          ["roughness", "Rugosidad", "Rugosidad Principled BSDF", material.roughness],
+                          ["alpha", "Opacidad", "Opacidad Principled BSDF", material.opacity ?? 1],
+                          ["ior", "IOR", "IOR", 1.45],
+                          ["specular", "Specular", "Specular", 0.5],
+                          ["emissionStrength", "Emisión", "Emission Strength", material.emissiveIntensity ?? 0],
+                        ] as const
+                      ).map(([key, label, ariaLabel, fallback]) => {
+                        const spec = getNodeNumericParamSpec("principled_bsdf", key);
+                        return (
+                          <NodeNumericBar
+                            key={key}
+                            label={label}
+                            ariaLabel={ariaLabel}
+                            value={Number(node.values[key] ?? fallback)}
+                            min={spec.min}
+                            max={spec.max}
+                            step={spec.step}
+                            decimals={spec.decimals}
+                            clampMin={spec.clampMin}
+                            clampMax={spec.clampMax}
+                            connected={isSocketConnected(key)}
+                            compact
+                            onBeginEdit={onBeginEdit}
+                            onChange={(val) => updateNode(node.id, { [key]: val })}
+                          />
+                        );
+                      })}
+                    </div>
+                    <label
+                      className={`flex items-center justify-between gap-2 text-[10px] text-[#aeb4c0] ${
+                        isSocketConnected("emission") ? "opacity-60" : ""
+                      }`}
+                    >
+                      <span>
+                        Emisión
+                        {isSocketConnected("emission") ? " (conectado)" : ""}
+                      </span>
                       <input
                         type="color"
                         aria-label="Color de emisión"
+                        disabled={isSocketConnected("emission")}
                         value={String(node.values.emission ?? "#000000")}
                         onPointerDown={onBeginEdit}
                         onChange={(event) => updateNode(node.id, { emission: event.target.value })}
-                        className="h-7 w-14 cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5"
+                        className="h-7 w-14 cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5 disabled:cursor-not-allowed"
                       />
                     </label>
                   </div>
                 )}
 
+                {!isCollapsed && node.type === "emission" && (() => {
+                  const strengthSpec = getNodeNumericParamSpec("emission", "strength");
+                  return (
+                    <div className="space-y-1.5">
+                      <label
+                        className={`flex items-center justify-between gap-2 text-[10px] text-[#aeb4c0] ${
+                          isSocketConnected("color") ? "opacity-60" : ""
+                        }`}
+                      >
+                        <span>
+                          Color
+                          {isSocketConnected("color") ? " (conectado)" : ""}
+                        </span>
+                        <input
+                          type="color"
+                          aria-label="Color Emission"
+                          disabled={isSocketConnected("color")}
+                          value={String(node.values.color ?? "#ffffff")}
+                          onPointerDown={onBeginEdit}
+                          onChange={(event) => updateNode(node.id, { color: event.target.value })}
+                          className="h-7 w-14 cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5 disabled:cursor-not-allowed"
+                        />
+                      </label>
+                      <NodeNumericBar
+                        label="Fuerza"
+                        ariaLabel="Fuerza Emission"
+                        value={Number(node.values.strength ?? 1)}
+                        min={strengthSpec.min}
+                        max={strengthSpec.max}
+                        step={strengthSpec.step}
+                        decimals={strengthSpec.decimals}
+                        clampMin={strengthSpec.clampMin}
+                        clampMax={strengthSpec.clampMax}
+                        connected={isSocketConnected("strength")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { strength: val })}
+                      />
+                    </div>
+                  );
+                })()}
+
                 {!isCollapsed && node.type === "math" && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="col-span-2 space-y-1 text-[10px] text-[#aeb4c0]">
+                  <div className="space-y-1.5">
+                    <label className="block space-y-1 text-[10px] text-[#aeb4c0]">
                       Operación
                       <select
                         aria-label="Operación Math"
@@ -2240,23 +2710,27 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                         ))}
                       </select>
                     </label>
-                    {(["a", "b"] as const).map((key) => (
-                      <label key={key} className="space-y-1 text-[10px] text-[#aeb4c0]">
-                        Valor {key.toUpperCase()}
-                        <input
-                          type="number"
-                          aria-label={`Valor Math ${key.toUpperCase()}`}
-                          value={Number(node.values[key] ?? 0)}
-                          onFocus={onBeginEdit}
-                          onChange={(event) =>
-                            updateNode(node.id, {
-                              [key]: Number(event.target.value),
-                            })
-                          }
-                          className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
-                        />
-                      </label>
-                    ))}
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(["a", "b"] as const).map((key) => {
+                        const spec = getNodeNumericParamSpec("math", key);
+                        return (
+                          <NodeNumericBar
+                            key={key}
+                            label={`Valor ${key.toUpperCase()}`}
+                            ariaLabel={`Valor Math ${key.toUpperCase()}`}
+                            value={Number(node.values[key] ?? 0)}
+                            min={spec.min}
+                            max={spec.max}
+                            step={spec.step}
+                            decimals={spec.decimals}
+                            connected={isSocketConnected(key)}
+                            compact
+                            onBeginEdit={onBeginEdit}
+                            onChange={(val) => updateNode(node.id, { [key]: val })}
+                          />
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
 
@@ -2318,31 +2792,20 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                         ["scale", "Escala", [1, 1, 1]],
                       ] as const
                     ).map(([key, label, defaults]) => {
-                      const vector = Array.isArray(node.values[key]) ? node.values[key] : defaults;
+                      const vector = Array.isArray(node.values[key])
+                        ? node.values[key].map(Number)
+                        : [...defaults];
                       return (
-                        <fieldset key={key} className="space-y-1">
-                          <legend className="text-[10px] text-[#aeb4c0]">{label}</legend>
-                          <div className="grid grid-cols-3 gap-1">
-                            {(["X", "Y", "Z"] as const).map((axis, index) => (
-                              <input
-                                key={axis}
-                                type="number"
-                                step="0.1"
-                                aria-label={`${label} ${axis}`}
-                                value={Number(vector[index] ?? defaults[index])}
-                                onFocus={onBeginEdit}
-                                onChange={(event) => {
-                                  const nextVector = [...defaults].map((_, componentIndex) =>
-                                    Number(vector[componentIndex] ?? defaults[componentIndex]),
-                                  );
-                                  nextVector[index] = Number(event.target.value);
-                                  updateNode(node.id, { [key]: nextVector });
-                                }}
-                                className="h-7 min-w-0 w-full rounded border border-[#343a46] bg-[#121418] px-1 text-[10px] text-[#cbd5e1]"
-                              />
-                            ))}
-                          </div>
-                        </fieldset>
+                        <NodeVectorSliders
+                          key={key}
+                          legend={label}
+                          ariaPrefix={label}
+                          vector={vector}
+                          defaults={defaults}
+                          spec={getNodeNumericParamSpec("mapping", key)}
+                          onBeginEdit={onBeginEdit}
+                          onChange={(nextVector) => updateNode(node.id, { [key]: nextVector })}
+                        />
                       );
                     })}
                   </div>
@@ -2356,31 +2819,20 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                         ["scale", "Escala", [1, 1, 1]],
                       ] as const
                     ).map(([key, label, defaults]) => {
-                      const vector = Array.isArray(node.values[key]) ? node.values[key] : defaults;
+                      const vector = Array.isArray(node.values[key])
+                        ? node.values[key].map(Number)
+                        : [...defaults];
                       return (
-                        <fieldset key={key} className="space-y-1">
-                          <legend className="text-[10px] text-[#aeb4c0]">{label}</legend>
-                          <div className="grid grid-cols-3 gap-1">
-                            {(["X", "Y", "Z"] as const).map((axis, index) => (
-                              <input
-                                key={axis}
-                                type="number"
-                                step={key === "rotation" ? "1" : "0.1"}
-                                aria-label={`${label} ${axis}`}
-                                value={Number(vector[index] ?? defaults[index])}
-                                onFocus={onBeginEdit}
-                                onChange={(event) => {
-                                  const nextVector = [...defaults].map((_, componentIndex) =>
-                                    Number(vector[componentIndex] ?? defaults[componentIndex]),
-                                  );
-                                  nextVector[index] = Number(event.target.value);
-                                  updateNode(node.id, { [key]: nextVector });
-                                }}
-                                className="h-7 min-w-0 w-full rounded border border-[#343a46] bg-[#121418] px-1 text-[10px] text-[#cbd5e1]"
-                              />
-                            ))}
-                          </div>
-                        </fieldset>
+                        <NodeVectorSliders
+                          key={key}
+                          legend={label}
+                          ariaPrefix={label}
+                          vector={vector}
+                          defaults={defaults}
+                          spec={getNodeNumericParamSpec("transform", key)}
+                          onBeginEdit={onBeginEdit}
+                          onChange={(nextVector) => updateNode(node.id, { [key]: nextVector })}
+                        />
                       );
                     })}
                   </div>
@@ -2391,38 +2843,39 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                   node.type === "value_color" ||
                   node.type === "value_vector") && (
                   <div className="space-y-2">
-                    {node.type === "value_float" && (
-                      <label className="block space-y-1 text-[10px] text-[#aeb4c0]">
-                        Valor
-                        <input
-                          type="number"
-                          step="0.01"
-                          aria-label="Valor Float"
+                    {node.type === "value_float" && (() => {
+                      const spec = getNodeNumericParamSpec("value_float", "value");
+                      return (
+                        <NodeNumericBar
+                          label="Valor"
+                          ariaLabel="Valor Float"
                           value={Number(node.values.value ?? 0)}
-                          onFocus={onBeginEdit}
-                          onChange={(event) =>
-                            updateNode(node.id, { value: Number(event.target.value) })
-                          }
-                          className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                          min={spec.min}
+                          max={spec.max}
+                          step={spec.step}
+                          decimals={spec.decimals}
+                          numericMode="number"
+                          onBeginEdit={onBeginEdit}
+                          onChange={(val) => updateNode(node.id, { value: val })}
                         />
-                      </label>
-                    )}
-                    {node.type === "value_integer" && (
-                      <label className="block space-y-1 text-[10px] text-[#aeb4c0]">
-                        Valor entero
-                        <input
-                          type="number"
-                          step="1"
-                          aria-label="Valor Integer"
+                      );
+                    })()}
+                    {node.type === "value_integer" && (() => {
+                      const spec = getNodeNumericParamSpec("value_integer", "value");
+                      return (
+                        <NodeNumericBar
+                          label="Valor entero"
+                          ariaLabel="Valor Integer"
                           value={Math.trunc(Number(node.values.value ?? 0))}
-                          onFocus={onBeginEdit}
-                          onChange={(event) =>
-                            updateNode(node.id, { value: Math.trunc(Number(event.target.value)) })
-                          }
-                          className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                          min={spec.min}
+                          max={spec.max}
+                          step={spec.step}
+                          decimals={0}
+                          onBeginEdit={onBeginEdit}
+                          onChange={(val) => updateNode(node.id, { value: Math.trunc(val) })}
                         />
-                      </label>
-                    )}
+                      );
+                    })()}
                     {node.type === "value_boolean" && (
                       <label className="flex items-center justify-between gap-2 text-[10px] text-[#aeb4c0]">
                         Activado
@@ -2456,195 +2909,185 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                     {node.type === "value_vector" &&
                       (() => {
                         const vector = Array.isArray(node.values.value)
-                          ? node.values.value
+                          ? node.values.value.map(Number)
                           : [0, 0, 0];
                         return (
-                          <fieldset className="space-y-1">
-                            <legend className="text-[10px] text-[#aeb4c0]">Vector</legend>
-                            <div className="grid grid-cols-3 gap-1">
-                              {(["X", "Y", "Z"] as const).map((axis, index) => (
-                                <input
-                                  key={axis}
-                                  type="number"
-                                  step="0.1"
-                                  aria-label={`Valor Vector ${axis}`}
-                                  value={Number(vector[index] ?? 0)}
-                                  onFocus={onBeginEdit}
-                                  onChange={(event) => {
-                                    const next = [0, 1, 2].map((item) => Number(vector[item] ?? 0));
-                                    next[index] = Number(event.target.value);
-                                    updateNode(node.id, { value: next });
-                                  }}
-                                  className="h-7 min-w-0 w-full rounded border border-[#343a46] bg-[#121418] px-1 text-[10px] text-[#cbd5e1]"
-                                />
-                              ))}
-                            </div>
-                          </fieldset>
+                          <NodeVectorSliders
+                            legend="Vector"
+                            ariaPrefix="Valor Vector"
+                            vector={vector}
+                            defaults={[0, 0, 0]}
+                            spec={getNodeNumericParamSpec("value_vector", "value")}
+                            onBeginEdit={onBeginEdit}
+                            onChange={(nextVector) => updateNode(node.id, { value: nextVector })}
+                          />
                         );
                       })()}
                   </div>
                 )}
 
-                {!isCollapsed && node.type === "normal_map" && (
-                  <label className="block space-y-1 text-[10px] text-[#aeb4c0]">
-                    Intensidad
-                    <input
-                      type="number"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                      aria-label="Intensidad Normal Map"
+                {!isCollapsed && node.type === "normal_map" && (() => {
+                  const spec = getNodeNumericParamSpec("normal_map", "strength");
+                  return (
+                    <NodeNumericBar
+                      label="Intensidad"
+                      ariaLabel="Intensidad Normal Map"
                       value={Number(node.values.strength ?? 1)}
-                      onFocus={onBeginEdit}
-                      onChange={(event) =>
-                        updateNode(node.id, {
-                          strength: Number(event.target.value),
-                        })
-                      }
-                      className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                      min={spec.min}
+                      max={spec.max}
+                      step={spec.step}
+                      decimals={spec.decimals}
+                      clampMin={spec.clampMin}
+                      connected={isSocketConnected("strength")}
+                      onBeginEdit={onBeginEdit}
+                      onChange={(val) => updateNode(node.id, { strength: val })}
                     />
-                  </label>
-                )}
+                  );
+                })()}
 
                 {!isCollapsed && node.type === "bump" && (
-                  <div className="grid grid-cols-2 gap-2">
-                    {(["strength", "distance"] as const).map((key) => (
-                      <label key={key} className="space-y-1 text-[10px] text-[#aeb4c0]">
-                        {key === "strength" ? "Intensidad" : "Distancia"}
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.1"
-                          aria-label={`Bump ${key === "strength" ? "intensidad" : "distancia"}`}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(["strength", "distance"] as const).map((key) => {
+                      const spec = getNodeNumericParamSpec("bump", key);
+                      return (
+                        <NodeNumericBar
+                          key={key}
+                          label={key === "strength" ? "Intensidad" : "Distancia"}
+                          ariaLabel={`Bump ${key === "strength" ? "intensidad" : "distancia"}`}
                           value={Number(node.values[key] ?? 1)}
-                          onFocus={onBeginEdit}
-                          onChange={(event) =>
-                            updateNode(node.id, {
-                              [key]: Number(event.target.value),
-                            })
-                          }
-                          className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                          min={spec.min}
+                          max={spec.max}
+                          step={spec.step}
+                          decimals={spec.decimals}
+                          clampMin={spec.clampMin}
+                          connected={isSocketConnected(key)}
+                          compact
+                          onBeginEdit={onBeginEdit}
+                          onChange={(val) => updateNode(node.id, { [key]: val })}
                         />
-                      </label>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
 
                 {!isCollapsed && (node.type === "mix_color" ||
                   node.type === "mix_float" ||
-                  node.type === "mix_vector") && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="col-span-2 flex items-center justify-between gap-2 text-[10px] text-[#aeb4c0]">
-                      Operación
-                      <select
-                        aria-label={`Operación ${getNodeDefinition(node.type).label}`}
-                        value={String(node.values.operation ?? "mix")}
-                        onFocus={onBeginEdit}
-                        onChange={(event) => updateNode(node.id, { operation: event.target.value })}
-                        className="h-7 min-w-0 rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
-                      >
-                        {[
-                          ["mix", "Mezclar"],
-                          ["add", "Sumar"],
-                          ["subtract", "Restar"],
-                          ["multiply", "Multiplicar"],
-                          ...(node.type === "mix_float"
-                            ? [
-                                ["minimum", "Mínimo"],
-                                ["maximum", "Máximo"],
-                              ]
-                            : []),
-                        ].map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="col-span-2 space-y-1 text-[10px] text-[#aeb4c0]">
-                      Factor
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        aria-label={`Factor ${getNodeDefinition(node.type).label}`}
+                  node.type === "mix_vector") && (() => {
+                  const factorSpec = getNodeNumericParamSpec(node.type, "factor");
+                  return (
+                    <div className="space-y-1.5">
+                      <label className="flex items-center justify-between gap-2 text-[10px] text-[#aeb4c0]">
+                        Operación
+                        <select
+                          aria-label={`Operación ${definition.label}`}
+                          value={String(node.values.operation ?? "mix")}
+                          onFocus={onBeginEdit}
+                          onChange={(event) => updateNode(node.id, { operation: event.target.value })}
+                          className="h-7 min-w-0 rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
+                        >
+                          {[
+                            ["mix", "Mezclar"],
+                            ["add", "Sumar"],
+                            ["subtract", "Restar"],
+                            ["multiply", "Multiplicar"],
+                            ...(node.type === "mix_float"
+                              ? [
+                                  ["minimum", "Mínimo"],
+                                  ["maximum", "Máximo"],
+                                ]
+                              : []),
+                          ].map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <NodeNumericBar
+                        label="Factor"
+                        ariaLabel={`Factor ${definition.label}`}
                         value={Number(node.values.factor ?? 0.5)}
-                        onPointerDown={onBeginEdit}
-                        onChange={(event) =>
-                          updateNode(node.id, {
-                            factor: Number(event.target.value),
-                          })
-                        }
-                        className="h-3 w-full cursor-pointer accent-[#5ecd6e]"
+                        min={factorSpec.min}
+                        max={factorSpec.max}
+                        step={factorSpec.step}
+                        decimals={factorSpec.decimals}
+                        clampMin={factorSpec.clampMin}
+                        clampMax={factorSpec.clampMax}
+                        connected={isSocketConnected("factor")}
+                        onBeginEdit={onBeginEdit}
+                        onChange={(val) => updateNode(node.id, { factor: val })}
                       />
-                    </label>
-                    {node.type === "mix_color" &&
-                      (["colorA", "colorB"] as const).map((key) => (
-                        <label key={key} className="space-y-1 text-[10px] text-[#aeb4c0]">
-                          Color {key === "colorA" ? "A" : "B"}
-                          <input
-                            type="color"
-                            aria-label={`Color ${key === "colorA" ? "A" : "B"} Mix Color`}
-                            value={String(node.values[key] ?? "#ffffff")}
-                            onPointerDown={onBeginEdit}
-                            onChange={(event) => updateNode(node.id, { [key]: event.target.value })}
-                            className="h-7 w-full cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5"
-                          />
-                        </label>
-                      ))}
-                    {node.type === "mix_float" &&
-                      (["a", "b"] as const).map((key) => (
-                        <label key={key} className="space-y-1 text-[10px] text-[#aeb4c0]">
-                          Valor {key.toUpperCase()}
-                          <input
-                            type="number"
-                            aria-label={`Mix Float ${key.toUpperCase()}`}
-                            value={Number(node.values[key] ?? 0)}
-                            onFocus={onBeginEdit}
-                            onChange={(event) =>
-                              updateNode(node.id, { [key]: Number(event.target.value) })
-                            }
-                            className="h-7 w-full rounded border border-[#343a46] bg-[#121418] px-1.5 text-[10px] text-[#cbd5e1]"
-                          />
-                        </label>
-                      ))}
-                    {node.type === "mix_vector" &&
-                      (["a", "b"] as const).map((key) => {
-                        const vector = Array.isArray(node.values[key])
-                          ? node.values[key]
-                          : [0, 0, 0];
-                        return (
-                          <fieldset key={key} className="space-y-1">
-                            <legend className="text-[10px] text-[#aeb4c0]">
-                              Vector {key.toUpperCase()}
-                            </legend>
-                            <div className="grid grid-cols-3 gap-1">
-                              {(["X", "Y", "Z"] as const).map((axis, index) => (
-                                <input
-                                  key={axis}
-                                  type="number"
-                                  aria-label={`Mix Vector ${key.toUpperCase()} ${axis}`}
-                                  value={Number(vector[index] ?? 0)}
-                                  onFocus={onBeginEdit}
-                                  onChange={(event) => {
-                                    const next = [0, 1, 2].map((item) => Number(vector[item] ?? 0));
-                                    next[index] = Number(event.target.value);
-                                    updateNode(node.id, { [key]: next });
-                                  }}
-                                  className="h-7 min-w-0 w-full rounded border border-[#343a46] bg-[#121418] px-1 text-[10px] text-[#cbd5e1]"
-                                />
-                              ))}
-                            </div>
-                          </fieldset>
-                        );
-                      })}
-                  </div>
-                )}
+                      {node.type === "mix_color" && (
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {(["colorA", "colorB"] as const).map((key) => (
+                            <label key={key} className="space-y-1 text-[10px] text-[#aeb4c0]">
+                              Color {key === "colorA" ? "A" : "B"}
+                              <input
+                                type="color"
+                                aria-label={`Color ${key === "colorA" ? "A" : "B"} Mix Color`}
+                                disabled={isSocketConnected(key)}
+                                value={String(node.values[key] ?? "#ffffff")}
+                                onPointerDown={onBeginEdit}
+                                onChange={(event) => updateNode(node.id, { [key]: event.target.value })}
+                                className="h-7 w-full cursor-pointer rounded border border-[#343a46] bg-[#121418] p-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                      {node.type === "mix_float" && (
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {(["a", "b"] as const).map((key) => {
+                            const spec = getNodeNumericParamSpec("mix_float", key);
+                            return (
+                              <NodeNumericBar
+                                key={key}
+                                label={`Valor ${key.toUpperCase()}`}
+                                ariaLabel={`Mix Float ${key.toUpperCase()}`}
+                                value={Number(node.values[key] ?? 0)}
+                                min={spec.min}
+                                max={spec.max}
+                                step={spec.step}
+                                decimals={spec.decimals}
+                                connected={isSocketConnected(key)}
+                                compact
+                                onBeginEdit={onBeginEdit}
+                                onChange={(val) => updateNode(node.id, { [key]: val })}
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
+                      {node.type === "mix_vector" && (
+                        <div className="space-y-1.5">
+                          {(["a", "b"] as const).map((key) => {
+                            const vector = Array.isArray(node.values[key])
+                              ? node.values[key].map(Number)
+                              : [0, 0, 0];
+                            return (
+                              <NodeVectorSliders
+                                key={key}
+                                legend={`Vector ${key.toUpperCase()}`}
+                                ariaPrefix={`Mix Vector ${key.toUpperCase()}`}
+                                vector={vector}
+                                defaults={[0, 0, 0]}
+                                spec={getNodeNumericParamSpec("mix_vector", key)}
+                                connected={isSocketConnected(key)}
+                                onBeginEdit={onBeginEdit}
+                                onChange={(nextVector) => updateNode(node.id, { [key]: nextVector })}
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {!isCollapsed && node.type === "color_ramp" && (
                   <ColorRampControls
                     node={node}
+                    factorConnected={isSocketConnected("factor")}
                     onBeginEdit={onBeginEdit}
                     onChange={(values) => updateNode(node.id, values)}
                   />
@@ -2972,7 +3415,7 @@ export const MaterialNodeEditor: React.FC<MaterialNodeEditorProps> = ({
                           data-node-id={node.id}
                           data-socket-id={output.id}
                           data-socket-key={getSocketKey(node.id, output.id, "output")}
-                          aria-label={`Socket de salida ${definition.label}: ${output.label}`}
+                          aria-label={`Socket de salida ${displayTitle}: ${output.label}`}
                           title={`${output.label} · ${output.type} (arrastra a una entrada)`}
                           className="flex h-5 w-4 shrink-0 items-center justify-center touch-none"
                           onPointerDown={(event) => startConnectionDrag(event, node, output.id, "output")}

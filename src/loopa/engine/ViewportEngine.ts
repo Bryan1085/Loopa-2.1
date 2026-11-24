@@ -59,6 +59,7 @@ import {
   TouchModifierState,
   TransformTool,
   ViewportDisplayMode,
+  ViewportProfile,
   WorkMode,
 } from '../core/project/types';
 import {
@@ -177,9 +178,16 @@ export interface ViewportCallbacks {
   onCommitObjectTransform: (id: string, before: ObjectTransform, after: ObjectTransform) => void;
   onCommitObjectTransforms: (changes: ObjectTransformChange[]) => void;
   onCommitMeshEdit: (id: string, before: EditableMesh, after: EditableMesh) => void;
+  onLiveSculptStroke?: (id: string, nextMesh: EditableMesh) => void;
   onCommitSculptStroke?: (id: string, nextMesh: EditableMesh) => void;
   onChangeProportionalRadius?: (radius: number) => void;
   onLoopCutSlideDelta?: (delta: number) => void;
+}
+
+export interface ViewportEngineOptions {
+  initialCameraPosition?: Vec3;
+  initialCameraTarget?: Vec3;
+  viewportProfile?: ViewportProfile;
 }
 
 interface ObjectVisual {
@@ -361,12 +369,16 @@ export class ViewportEngine {
         | 'roughnessMap'
         | 'metalnessMap'
         | 'aoMap'
-        | 'displacementMap',
+        | 'displacementMap'
+        | 'emissiveMap',
         { dataUrl: string; texture: THREE.Texture }
       >
     >
   >();
   private materialAssetMap = new Map<string, MaterialAsset>();
+  private materialMissingOutputIds = new Set<string>();
+  private missingOutputCheckerTexture: THREE.Texture | null = null;
+  private missingOutputCheckerMaterial: THREE.MeshStandardMaterial | null = null;
   private workMode: WorkMode = 'object';
   private editSelectionMode: EditSelectionMode = 'vertex';
   private selectedComponentIds = new Set<string>();
@@ -387,6 +399,14 @@ export class ViewportEngine {
   private proportionalPreviewRadiusUsed = -1;
   private proportionalPreviewFalloffUsed = '';
   private displayMode: ViewportDisplayMode = 'solid';
+  private viewportProfile: ViewportProfile = 'modeler';
+  private initialCameraPosition: Vec3 = [5.6, -6.2, 4.2];
+  private initialCameraTarget: Vec3 = [0, 0, 0];
+  private hemiLight: THREE.HemisphereLight;
+  private keyLight: THREE.DirectionalLight;
+  private rimLight: THREE.DirectionalLight;
+  private fillLight: THREE.DirectionalLight;
+  private lastLiveSculptEmitAt = 0;
   private xrayTransparency = 50;
   private showFaceOrientation = false;
   private editOverlaySourceMesh: EditableMesh | null = null;
@@ -495,9 +515,18 @@ export class ViewportEngine {
   private resizeObserver: ResizeObserver;
   private raycaster = new THREE.Raycaster();
 
-  constructor(container: HTMLElement, callbacks: ViewportCallbacks) {
+  constructor(container: HTMLElement, callbacks: ViewportCallbacks, options?: ViewportEngineOptions) {
     this.container = container;
     this.callbacks = callbacks;
+    if (options?.initialCameraPosition) {
+      this.initialCameraPosition = [...options.initialCameraPosition];
+    }
+    if (options?.initialCameraTarget) {
+      this.initialCameraTarget = [...options.initialCameraTarget];
+    }
+    if (options?.viewportProfile) {
+      this.viewportProfile = options.viewportProfile;
+    }
     this.isSoftwareGl = detectSoftwareWebGL();
 
     const width = Math.max(1, container.clientWidth);
@@ -531,8 +560,8 @@ export class ViewportEngine {
     // Cameras (Blender Z-up convention: X horizontal, Y depth, Z vertical)
     this.perspectiveCamera = new THREE.PerspectiveCamera(45, aspect, 0.05, 500);
     this.perspectiveCamera.up.set(0, 0, 1);
-    this.perspectiveCamera.position.set(5.6, -6.2, 4.2);
-    this.perspectiveCamera.lookAt(0, 0, 0);
+    this.perspectiveCamera.position.set(...this.initialCameraPosition);
+    this.perspectiveCamera.lookAt(...this.initialCameraTarget);
 
     const frustum = 7;
     this.orthographicCamera = new THREE.OrthographicCamera(
@@ -545,21 +574,27 @@ export class ViewportEngine {
     );
     this.orthographicCamera.up.set(0, 0, 1);
     this.orthographicCamera.position.copy(this.perspectiveCamera.position);
-    this.orthographicCamera.lookAt(0, 0, 0);
+    this.orthographicCamera.lookAt(...this.initialCameraTarget);
     this.activeCamera = this.perspectiveCamera;
 
-    // 3-Point Studio Lighting (Z-up)
-    const hemi = new THREE.HemisphereLight(0xa6bddb, 0x262930, 0.8);
-    this.scene.add(hemi);
+    // 3-Point Studio Lighting + Soft Fill (Z-up), tuned per viewportProfile
+    this.hemiLight = new THREE.HemisphereLight(0xa6bddb, 0x262930, 0.8);
+    this.scene.add(this.hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff5e8, 1.45);
-    keyLight.position.set(7, -8, 12);
-    keyLight.castShadow = false;
-    this.scene.add(keyLight);
+    this.keyLight = new THREE.DirectionalLight(0xfff5e8, 1.45);
+    this.keyLight.position.set(7, -8, 12);
+    this.keyLight.castShadow = false;
+    this.scene.add(this.keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0xc2d4ff, 0.55);
-    rimLight.position.set(-8, 7, 6);
-    this.scene.add(rimLight);
+    this.rimLight = new THREE.DirectionalLight(0xc2d4ff, 0.55);
+    this.rimLight.position.set(-8, 7, 6);
+    this.scene.add(this.rimLight);
+
+    this.fillLight = new THREE.DirectionalLight(0xdbeafe, 0.28);
+    this.fillLight.position.set(-6, -7, 4);
+    this.scene.add(this.fillLight);
+
+    this.applyViewportProfile();
 
     // Reference Grid rotated onto XY plane (Z = 0) — visual guide only, never writes depth
     this.gridHelper = new THREE.GridHelper(32, 32, 0x3f444f, 0x2a2d35);
@@ -1033,6 +1068,7 @@ export class ViewportEngine {
 
     // 3. OrbitControls (iPad Touch: 1 finger rotate, 2 fingers pinch/pan)
     this.orbitControls = new OrbitControls(this.activeCamera, this.renderer.domElement);
+    this.orbitControls.target.set(...this.initialCameraTarget);
     this.orbitControls.enableDamping = !this.isSoftwareGl;
     this.orbitControls.dampingFactor = 0.08;
     this.orbitControls.rotateSpeed = 0.75;
@@ -1405,6 +1441,56 @@ export class ViewportEngine {
     });
   }
 
+  private applyViewportProfile(): void {
+    const isMaterials = this.viewportProfile === 'materials';
+    if (isMaterials) {
+      this.hemiLight.color.setHex(0xdbeafe);
+      this.hemiLight.groundColor.setHex(0x1e222b);
+      this.hemiLight.intensity = 0.92;
+      this.keyLight.color.setHex(0xfff6ea);
+      this.keyLight.intensity = 1.85;
+      this.rimLight.color.setHex(0xc7dcff);
+      this.rimLight.intensity = 0.9;
+      this.fillLight.color.setHex(0xe2e8f0);
+      this.fillLight.intensity = 0.52;
+      this.scene.environmentIntensity = 1.35;
+      this.renderer.toneMappingExposure = 1.12;
+    } else {
+      this.hemiLight.color.setHex(0xa6bddb);
+      this.hemiLight.groundColor.setHex(0x262930);
+      this.hemiLight.intensity = 0.8;
+      this.keyLight.color.setHex(0xfff5e8);
+      this.keyLight.intensity = 1.45;
+      this.rimLight.color.setHex(0xc2d4ff);
+      this.rimLight.intensity = 0.55;
+      this.fillLight.color.setHex(0xdbeafe);
+      this.fillLight.intensity = 0.28;
+      this.scene.environmentIntensity = 0.78;
+      this.renderer.toneMappingExposure = 1.02;
+    }
+    if (!this.isCleanBlackViewport) {
+      const bgHex = isMaterials ? 0x15181e : 0x1d1f24;
+      this.scene.background = new THREE.Color(bgHex);
+      this.scene.fog = new THREE.FogExp2(bgHex, isMaterials ? 0.0085 : 0.011);
+    }
+  }
+
+  private emitLiveSculptStroke(objectId: string, workingMesh: EditableMesh, force = false): void {
+    if (!this.callbacks.onLiveSculptStroke) return;
+    const now = performance.now();
+    if (!force && now - this.lastLiveSculptEmitAt < 32) return;
+    this.lastLiveSculptEmitAt = now;
+    this.callbacks.onLiveSculptStroke(objectId, workingMesh.clone());
+  }
+
+  public syncLiveMeshPreview(objectId: string, nextMesh: EditableMesh): void {
+    if (this.disposed || this.sculptStrokeSession?.objectId === objectId) return;
+    const visual = this.visuals.get(objectId);
+    if (!visual || visual.objectType !== 'mesh') return;
+    this.applyLiveSculptMeshToVisual(visual, nextMesh.clone());
+    this.requestRender();
+  }
+
   private applyLiveSculptMeshToVisual(visual: ObjectVisual, nextBaseMesh: EditableMesh): void {
     visual.baseEditableMesh = nextBaseMesh;
     if (visual.hasActiveModifiers && visual.modifiers.length > 0) {
@@ -1535,6 +1621,7 @@ export class ViewportEngine {
     const changed = stepSculptStroke(session, hit.worldPoint, hit.worldNormal, true);
     if (changed) {
       this.applyLiveSculptMeshToVisual(hit.visual, session.workingMesh);
+      this.emitLiveSculptStroke(hit.visual.id, session.workingMesh, true);
     }
     this.updateSculptCursorVisual(hit.worldPoint, hit.worldNormal);
     this.requestRender();
@@ -1569,6 +1656,7 @@ export class ViewportEngine {
           const changed = stepSculptStroke(session, planeHit, this.sculptGrabPlane.normal);
           if (changed) {
             this.applyLiveSculptMeshToVisual(visual, session.workingMesh);
+            this.emitLiveSculptStroke(visual.id, session.workingMesh);
           }
           this.updateSculptCursorVisual(planeHit, this.sculptGrabPlane.normal);
           this.requestRender();
@@ -1585,6 +1673,7 @@ export class ViewportEngine {
       const changed = stepSculptStroke(session, hit.worldPoint, hit.worldNormal);
       if (changed) {
         this.applyLiveSculptMeshToVisual(hit.visual, session.workingMesh);
+        this.emitLiveSculptStroke(hit.visual.id, session.workingMesh);
       }
       this.updateSculptCursorVisual(hit.worldPoint, hit.worldNormal);
       this.requestRender();
@@ -3863,6 +3952,7 @@ export class ViewportEngine {
     highlightedNgonObjectId?: string | null;
     highlightedNgonFaceIds?: string[];
     sculptSettings?: SculptSettings;
+    viewportProfile?: ViewportProfile;
   }): void {
     if (
       params.modalCancelNonce !== undefined &&
@@ -3972,17 +4062,22 @@ export class ViewportEngine {
       this.mergeCursorMarker.visible = false;
     }
 
-    // Clean black inspection background + Grid & Axes visibility
+    // Clean black inspection background + viewportProfile lighting/background + Grid & Axes visibility
     const cleanBlack = Boolean(params.settings.cleanBlackViewport);
+    const nextProfile = params.viewportProfile ?? 'modeler';
+    const profileChanged = nextProfile !== this.viewportProfile;
+    this.viewportProfile = nextProfile;
+
     if (cleanBlack !== this.isCleanBlackViewport) {
       this.isCleanBlackViewport = cleanBlack;
       if (cleanBlack) {
         this.scene.background = new THREE.Color(0x000000);
         this.scene.fog = null;
       } else {
-        this.scene.background = new THREE.Color(0x1d1f24);
-        this.scene.fog = new THREE.FogExp2(0x1d1f24, 0.011);
+        this.applyViewportProfile();
       }
+    } else if (profileChanged) {
+      this.applyViewportProfile();
     }
     this.gridHelper.visible = cleanBlack ? false : params.settings.showGrid;
     this.axesGroup.visible = cleanBlack ? false : params.settings.showAxes;
@@ -4215,12 +4310,16 @@ export class ViewportEngine {
 
   private syncSharedMaterials(materials: MaterialAsset[]): void {
     this.materialAssetMap.clear();
+    this.materialMissingOutputIds.clear();
     for (const mat of materials) {
       this.materialAssetMap.set(mat.id, mat);
       let threeMat = this.sharedMaterials.get(mat.id);
       const evaluation = mat.nodeGraph
         ? evaluateMaterialNodeGraph(mat.nodeGraph, mat)
         : null;
+      if (evaluation && !evaluation.hasConnectedOutput) {
+        this.materialMissingOutputIds.add(mat.id);
+      }
       const surface: EvaluatedMaterialSurface = evaluation?.ok
         ? evaluation.surface
         : {
@@ -4240,6 +4339,16 @@ export class ViewportEngine {
       const isTransparent = opacity < 0.999;
       const effectiveMetalness = surface.metallicTextureUrl ? 1 : surface.metallic;
       const effectiveRoughness = surface.roughnessTextureUrl ? 1 : surface.roughness;
+      const hasEmissionColor = Boolean(surface.emissionColor && surface.emissionIntensity > 0);
+      const hasEmissionMap = Boolean(surface.emissionTextureUrl);
+      const targetEmissive = hasEmissionMap
+        ? surface.emissionColor || '#ffffff'
+        : hasEmissionColor
+          ? surface.emissionColor!
+          : '#000000';
+      const targetEmissiveIntensity =
+        hasEmissionMap || hasEmissionColor ? surface.emissionIntensity ?? 1 : 0;
+
       if (!threeMat) {
         threeMat = new THREE.MeshPhysicalMaterial({
           color: textureDataUrl ? '#ffffff' : surface.baseColor,
@@ -4255,10 +4364,8 @@ export class ViewportEngine {
           polygonOffsetFactor: 1,
           polygonOffsetUnits: 1,
         });
-        if (surface.emissionColor && surface.emissionIntensity) {
-          threeMat.emissive.set(surface.emissionColor);
-          threeMat.emissiveIntensity = surface.emissionIntensity;
-        }
+        threeMat.emissive.set(targetEmissive);
+        threeMat.emissiveIntensity = targetEmissiveIntensity;
         this.sharedMaterials.set(mat.id, threeMat);
       } else {
         threeMat.color.set(textureDataUrl ? '#ffffff' : surface.baseColor);
@@ -4272,19 +4379,21 @@ export class ViewportEngine {
         }
         threeMat.opacity = opacity;
         threeMat.depthWrite = !isTransparent;
-        if (surface.emissionColor && surface.emissionIntensity) {
-          threeMat.emissive.set(surface.emissionColor);
-          threeMat.emissiveIntensity = surface.emissionIntensity;
-        } else {
-          threeMat.emissive.setHex(0x000000);
-          threeMat.emissiveIntensity = 1;
-        }
+        threeMat.emissive.set(targetEmissive);
+        threeMat.emissiveIntensity = targetEmissiveIntensity;
       }
       this.syncSharedMaterialTexture(
         mat,
         threeMat,
         'map',
         textureDataUrl,
+        surface.textureTransform,
+      );
+      this.syncSharedMaterialTexture(
+        mat,
+        threeMat,
+        'emissiveMap',
+        surface.emissionTextureUrl,
         surface.textureTransform,
       );
       this.syncSharedMaterialTexture(
@@ -4447,7 +4556,8 @@ export class ViewportEngine {
       | 'roughnessMap'
       | 'metalnessMap'
       | 'aoMap'
-      | 'displacementMap',
+      | 'displacementMap'
+      | 'emissiveMap',
     dataUrl: string | undefined,
     transform?: EvaluatedMaterialSurface['textureTransform'],
   ): void {
@@ -4493,6 +4603,7 @@ export class ViewportEngine {
     }
 
     current?.texture.dispose();
+    const isSrgb = channel === 'map' || channel === 'emissiveMap';
     const texture = new THREE.TextureLoader().load(
       dataUrl,
       () => {
@@ -4502,8 +4613,7 @@ export class ViewportEngine {
         ) {
           return;
         }
-        texture.colorSpace =
-          channel === 'map' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+        texture.colorSpace = isSrgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
         applyTransform(texture);
       },
       undefined,
@@ -4531,8 +4641,7 @@ export class ViewportEngine {
         texture.dispose();
       },
     );
-    texture.colorSpace =
-      channel === 'map' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    texture.colorSpace = isSrgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
     applyTransform(texture);
     materialTextures[channel] = { dataUrl, texture };
     this.sharedMaterialTextures.set(materialAsset.id, materialTextures);
@@ -4576,11 +4685,87 @@ export class ViewportEngine {
     return fallback;
   }
 
+  private getMissingOutputCheckerMaterial(): THREE.MeshStandardMaterial {
+    if (this.missingOutputCheckerMaterial) {
+      return this.missingOutputCheckerMaterial;
+    }
+    const cells = 8;
+    let texture: THREE.Texture;
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      const cellPx = canvas.width / cells;
+      for (let y = 0; y < cells; y += 1) {
+        for (let x = 0; x < cells; x += 1) {
+          ctx.fillStyle = (x + y) % 2 === 0 ? '#111317' : '#f3f4f6';
+          ctx.fillRect(x * cellPx, y * cellPx, cellPx, cellPx);
+        }
+      }
+      const canvasTex = new THREE.CanvasTexture(canvas);
+      canvasTex.colorSpace = THREE.SRGBColorSpace;
+      canvasTex.wrapS = THREE.RepeatWrapping;
+      canvasTex.wrapT = THREE.RepeatWrapping;
+      canvasTex.repeat.set(2, 2);
+      canvasTex.magFilter = THREE.NearestFilter;
+      canvasTex.minFilter = THREE.LinearMipmapLinearFilter;
+      canvasTex.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy?.() ?? 1);
+      canvasTex.needsUpdate = true;
+      texture = canvasTex;
+    } else {
+      const data = new Uint8Array(cells * cells * 4);
+      for (let y = 0; y < cells; y += 1) {
+        for (let x = 0; x < cells; x += 1) {
+          const idx = (y * cells + x) * 4;
+          const v = (x + y) % 2 === 0 ? 18 : 243;
+          data[idx] = v;
+          data[idx + 1] = v;
+          data[idx + 2] = v;
+          data[idx + 3] = 255;
+        }
+      }
+      const dataTex = new THREE.DataTexture(data, cells, cells, THREE.RGBAFormat);
+      dataTex.colorSpace = THREE.SRGBColorSpace;
+      dataTex.wrapS = THREE.RepeatWrapping;
+      dataTex.wrapT = THREE.RepeatWrapping;
+      dataTex.repeat.set(2, 2);
+      dataTex.magFilter = THREE.NearestFilter;
+      dataTex.needsUpdate = true;
+      texture = dataTex;
+    }
+
+    this.missingOutputCheckerTexture = texture;
+    this.missingOutputCheckerMaterial = new THREE.MeshStandardMaterial({
+      name: '__missing_output_checker__',
+      color: 0xffffff,
+      map: texture,
+      roughness: 0.7,
+      metalness: 0.04,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    return this.missingOutputCheckerMaterial;
+  }
+
   private getMaterialForSlotId(
     slotMatId: string,
     objData: SceneObjectData,
     fallback: THREE.MeshStandardMaterial,
   ): THREE.MeshStandardMaterial {
+    const matList = Array.from(this.materialAssetMap.values());
+    const resolvedId =
+      slotMatId && slotMatId !== '__default__'
+        ? slotMatId
+        : resolveObjectMaterial(objData, matList).id;
+    if (
+      (this.viewportProfile === 'materials' || this.displayMode === 'material') &&
+      this.materialMissingOutputIds.has(resolvedId)
+    ) {
+      return this.getMissingOutputCheckerMaterial();
+    }
     if (slotMatId && slotMatId !== '__default__') {
       const pooled = this.sharedMaterials.get(slotMatId);
       if (pooled) return pooled;
@@ -5254,6 +5439,30 @@ export class ViewportEngine {
     if (triData.uvs) {
       solidGeo.setAttribute('uv', new THREE.BufferAttribute(triData.uvs, 2));
       solidGeo.setAttribute('uv2', new THREE.BufferAttribute(triData.uvs, 2));
+    } else if (triData.positions.length > 0) {
+      // Box/triplanar fallback UVs so disconnected-output checkerboard always renders on UV-less meshes
+      const vertCount = triData.positions.length / 3;
+      const boxUvs = new Float32Array(vertCount * 2);
+      for (let i = 0; i < vertCount; i += 1) {
+        const px = triData.positions[i * 3];
+        const py = triData.positions[i * 3 + 1];
+        const pz = triData.positions[i * 3 + 2];
+        const nx = Math.abs(triData.normals[i * 3]);
+        const ny = Math.abs(triData.normals[i * 3 + 1]);
+        const nz = Math.abs(triData.normals[i * 3 + 2]);
+        if (nz >= nx && nz >= ny) {
+          boxUvs[i * 2] = px * 0.5 + 0.5;
+          boxUvs[i * 2 + 1] = py * 0.5 + 0.5;
+        } else if (nx >= ny) {
+          boxUvs[i * 2] = py * 0.5 + 0.5;
+          boxUvs[i * 2 + 1] = pz * 0.5 + 0.5;
+        } else {
+          boxUvs[i * 2] = px * 0.5 + 0.5;
+          boxUvs[i * 2 + 1] = pz * 0.5 + 0.5;
+        }
+      }
+      solidGeo.setAttribute('uv', new THREE.BufferAttribute(boxUvs, 2));
+      solidGeo.setAttribute('uv2', new THREE.BufferAttribute(boxUvs, 2));
     }
     solidGeo.clearGroups();
     for (const grp of triData.materialGroups) {
@@ -6063,11 +6272,11 @@ export class ViewportEngine {
     if (this.disposed) return;
     this.cameraAnimTargetPos = null;
     this.cameraAnimTargetLook = null;
-    this.orbitControls.target.set(0, 0, 0);
-    this.perspectiveCamera.position.set(5.6, -6.2, 4.2);
-    this.perspectiveCamera.lookAt(0, 0, 0);
+    this.orbitControls.target.set(...this.initialCameraTarget);
+    this.perspectiveCamera.position.set(...this.initialCameraPosition);
+    this.perspectiveCamera.lookAt(...this.initialCameraTarget);
     this.orthographicCamera.position.copy(this.perspectiveCamera.position);
-    this.orthographicCamera.lookAt(0, 0, 0);
+    this.orthographicCamera.lookAt(...this.initialCameraTarget);
     this.orbitControls.update();
     this.emitCameraPose();
     if (!this.paused) {
@@ -6311,6 +6520,11 @@ export class ViewportEngine {
     }
     this.sharedMaterialTextures.clear();
     this.materialAssetMap.clear();
+    this.materialMissingOutputIds.clear();
+    this.missingOutputCheckerMaterial?.dispose();
+    this.missingOutputCheckerMaterial = null;
+    this.missingOutputCheckerTexture?.dispose();
+    this.missingOutputCheckerTexture = null;
 
     this.unregisterCachePurgeHook?.();
     this.unregisterCachePurgeHook = null;

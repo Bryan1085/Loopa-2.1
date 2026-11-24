@@ -18,6 +18,7 @@ interface MaterialNodeViewportProps {
     recordHistory?: boolean,
   ) => void;
   screenModifiers?: TouchModifierState;
+  onEffectiveModifiersChange?: (modifiers: TouchModifierState) => void;
   onUndo?: () => void;
   onRedo?: () => void;
 }
@@ -30,6 +31,7 @@ export const MaterialNodeViewport: React.FC<MaterialNodeViewportProps> = ({
   onPushMaterialHistory,
   onUpdateMaterial,
   screenModifiers,
+  onEffectiveModifiersChange,
   onUndo,
   onRedo,
 }) => {
@@ -124,6 +126,7 @@ export const MaterialNodeViewport: React.FC<MaterialNodeViewportProps> = ({
             variant="canvas"
             toolbarStart={materialSelector}
             screenModifiers={screenModifiers}
+            onEffectiveModifiersChange={onEffectiveModifiersChange}
             onUndo={onUndo}
             onRedo={onRedo}
             onBeginEdit={onPushMaterialHistory}

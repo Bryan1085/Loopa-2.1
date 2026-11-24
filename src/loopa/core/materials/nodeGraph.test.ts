@@ -690,4 +690,130 @@ describe("material node graph", () => {
       evalEuclideanF1.surface.roughnessTextureUrl,
     );
   });
+
+  it("reports output connection status cleanly when Material Output is disconnected or deleted without crashing", () => {
+    const material = createMaterialAsset({ id: "material-output-status", baseColor: "#4477aa" });
+    const graph = createDefaultMaterialNodeGraph(material);
+
+    const connected = evaluateMaterialNodeGraph(graph, material);
+    expect(connected.ok).toBe(true);
+    expect(connected.hasConnectedOutput).toBe(true);
+    expect(connected.outputStatus).toBe("connected");
+
+    // Disconnect link to Material Output
+    const disconnectedGraph = {
+      ...graph,
+      links: [],
+    };
+    const disconnected = evaluateMaterialNodeGraph(disconnectedGraph, material);
+    expect(disconnected.ok).toBe(false);
+    expect(disconnected.hasConnectedOutput).toBe(false);
+    expect(disconnected.outputStatus).toBe("disconnected");
+    expect(disconnected.surface.baseColor).toBe("#4477aa");
+
+    // Delete Material Output node completely
+    const missingOutputGraph = {
+      nodes: graph.nodes.filter((node) => node.type !== "material_output"),
+      links: [],
+    };
+    const missingOutput = evaluateMaterialNodeGraph(missingOutputGraph, material);
+    expect(missingOutput.ok).toBe(false);
+    expect(missingOutput.hasConnectedOutput).toBe(false);
+    expect(missingOutput.outputStatus).toBe("missing_output");
+    expect(missingOutput.surface.baseColor).toBe("#4477aa");
+  });
+
+  it("evaluates the Emission shader node with solid color and procedural textures", () => {
+    const material = createMaterialAsset({ id: "material-emission" });
+    const graph = createDefaultMaterialNodeGraph(material);
+    const output = graph.nodes.find((node) => node.type === "material_output")!;
+
+    graph.nodes.push({
+      id: "emission-node",
+      type: "emission",
+      position: { x: 260, y: 120 },
+      values: { color: "#ff5500", strength: 3.5 },
+    });
+    graph.links = [
+      {
+        id: "emission-surface",
+        fromNodeId: "emission-node",
+        fromSocket: "emission",
+        toNodeId: output.id,
+        toSocket: "surface",
+      },
+    ];
+
+    const solidEval = evaluateMaterialNodeGraph(graph, material);
+    expect(solidEval.ok).toBe(true);
+    expect(solidEval.hasConnectedOutput).toBe(true);
+    expect(solidEval.surface.emissionColor).toBe("#ff5500");
+    expect(solidEval.surface.emissionIntensity).toBeCloseTo(3.5);
+    expect(solidEval.surface.emissionTextureUrl).toBeUndefined();
+
+    // Connect a Noise Texture + Color Ramp into Emission Color
+    graph.nodes.push(
+      {
+        id: "noise-em",
+        type: "noise_texture",
+        position: { x: 0, y: 120 },
+        values: { scale: 6, detail: 2 },
+      },
+      {
+        id: "ramp-em",
+        type: "color_ramp",
+        position: { x: 120, y: 120 },
+        values: {
+          factor: 0.5,
+          interpolation: "linear",
+          stops: [
+            { position: 0, color: "#000000" },
+            { position: 1, color: "#00ffcc" },
+          ],
+        },
+      },
+    );
+    graph.links.push(
+      {
+        id: "noise-ramp-em",
+        fromNodeId: "noise-em",
+        fromSocket: "factor",
+        toNodeId: "ramp-em",
+        toSocket: "factor",
+      },
+      {
+        id: "ramp-emission-color",
+        fromNodeId: "ramp-em",
+        fromSocket: "color",
+        toNodeId: "emission-node",
+        toSocket: "color",
+      },
+    );
+
+    const texEval = evaluateMaterialNodeGraph(graph, material);
+    expect(texEval.ok).toBe(true);
+    expect(texEval.surface.emissionTextureUrl).toMatch(/^data:image\/png;base64,/);
+    expect(texEval.surface.emissionIntensity).toBeCloseTo(3.5);
+  });
+
+  it("preserves custom node labels and Emission nodes through graph normalization", () => {
+    const material = createMaterialAsset({ id: "material-label-norm" });
+    const graph = createDefaultMaterialNodeGraph(material);
+    graph.nodes[0].label = "Piel Base";
+    graph.nodes.push({
+      id: "emission-1",
+      type: "emission",
+      label: "Brillo Neón",
+      position: { x: 300, y: 300 },
+      values: { color: "#00ff88", strength: 2.2 },
+    });
+
+    const normalized = normalizeMaterialNodeGraph(graph, material);
+    expect(normalized.nodes.find((n) => n.id === graph.nodes[0].id)?.label).toBe("Piel Base");
+    expect(normalized.nodes.find((n) => n.id === "emission-1")).toMatchObject({
+      type: "emission",
+      label: "Brillo Neón",
+      values: { color: "#00ff88", strength: 2.2 },
+    });
+  });
 });

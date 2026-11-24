@@ -150,14 +150,16 @@ export function computeScenePolygonLoad(objects: SceneObjectData[]): {
   return { totalVertices, totalFaces, meshObjects };
 }
 
-export function computeAdaptiveBudgets(
-  capabilities: RuntimeDeviceCapabilities,
-  limits: GeometryResourceLimits,
-): {
+export interface AdaptiveResourceBudgets {
   deviceBudgetMB: number;
   recommendedMaxFaces: number;
   hardMaxFaces: number;
-} {
+}
+
+export function computeAdaptiveBudgets(
+  capabilities: RuntimeDeviceCapabilities,
+  limits: GeometryResourceLimits,
+): AdaptiveResourceBudgets {
   // Base memory budget tailored dynamically to runtime hardware (bounded so tabs remain stable)
   const autoBudgetMB = Math.round(
     Math.max(

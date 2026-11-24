@@ -67,6 +67,16 @@ export const MATERIAL_NODE_DEFINITIONS: MaterialNodeDefinition[] = [
     outputs: [socket("bsdf", "BSDF", "shader")],
   },
   {
+    id: "emission",
+    label: "Emission",
+    category: "shader",
+    inputs: [
+      socket("color", "Color", "color"),
+      socket("strength", "Strength", "float"),
+    ],
+    outputs: [socket("emission", "Emission", "shader")],
+  },
+  {
     id: "image_texture",
     label: "Image Texture",
     category: "texture",
@@ -325,13 +335,69 @@ export interface EvaluatedMaterialSurface {
   ior: number;
   specular: number;
   emissionColor: string;
+  emissionTextureUrl?: string;
   emissionIntensity: number;
 }
 
+export type MaterialOutputStatus = "connected" | "disconnected" | "missing_output" | "invalid";
+
 export interface MaterialGraphEvaluation {
   ok: boolean;
+  hasConnectedOutput: boolean;
+  outputStatus: MaterialOutputStatus;
   surface: EvaluatedMaterialSurface;
   errors: string[];
+}
+
+export interface NodeNumericParamSpec {
+  min: number;
+  max: number;
+  step: number;
+  decimals?: number;
+  clampMin?: number;
+  clampMax?: number;
+}
+
+export const NODE_NUMERIC_PARAM_SPECS: Record<string, NodeNumericParamSpec> = {
+  "principled_bsdf.metallic": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "principled_bsdf.roughness": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "principled_bsdf.alpha": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "principled_bsdf.ior": { min: 1, max: 2.5, step: 0.01, decimals: 2, clampMin: 1, clampMax: 2.5 },
+  "principled_bsdf.specular": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "principled_bsdf.emissionStrength": { min: 0, max: 20, step: 0.1, decimals: 2, clampMin: 0 },
+  "emission.strength": { min: 0, max: 25, step: 0.1, decimals: 2, clampMin: 0 },
+  "math.a": { min: -10, max: 10, step: 0.05, decimals: 2 },
+  "math.b": { min: -10, max: 10, step: 0.05, decimals: 2 },
+  "normal_map.strength": { min: 0, max: 2, step: 0.01, decimals: 2, clampMin: 0 },
+  "bump.strength": { min: 0, max: 2, step: 0.01, decimals: 2, clampMin: 0 },
+  "bump.distance": { min: 0, max: 5, step: 0.05, decimals: 2, clampMin: 0 },
+  "mix_color.factor": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "mix_float.factor": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "mix_float.a": { min: -10, max: 10, step: 0.05, decimals: 2 },
+  "mix_float.b": { min: -10, max: 10, step: 0.05, decimals: 2 },
+  "mix_vector.factor": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "mix_vector.a": { min: -10, max: 10, step: 0.05, decimals: 2 },
+  "mix_vector.b": { min: -10, max: 10, step: 0.05, decimals: 2 },
+  "color_ramp.factor": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "color_ramp.position": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "color_ramp.alpha": { min: 0, max: 1, step: 0.01, decimals: 2, clampMin: 0, clampMax: 1 },
+  "mapping.location": { min: -10, max: 10, step: 0.05, decimals: 2 },
+  "mapping.rotation": { min: -6.28, max: 6.28, step: 0.05, decimals: 2 },
+  "mapping.scale": { min: 0.01, max: 20, step: 0.05, decimals: 2 },
+  "transform.location": { min: -10, max: 10, step: 0.05, decimals: 2 },
+  "transform.rotation": { min: -360, max: 360, step: 1, decimals: 1 },
+  "transform.scale": { min: 0.01, max: 20, step: 0.05, decimals: 2 },
+  "value_float.value": { min: -10, max: 10, step: 0.01, decimals: 2 },
+  "value_integer.value": { min: -50, max: 50, step: 1, decimals: 0 },
+  "value_vector.value": { min: -10, max: 10, step: 0.05, decimals: 2 },
+};
+
+export function getNodeNumericParamSpec(
+  nodeType: MaterialNodeType,
+  paramKey: string,
+  fallback: NodeNumericParamSpec = { min: -10, max: 10, step: 0.05, decimals: 2 },
+): NodeNumericParamSpec {
+  return NODE_NUMERIC_PARAM_SPECS[`${nodeType}.${paramKey}`] ?? fallback;
 }
 
 const MATERIAL_NODE_TYPE_SET = new Set<MaterialNodeType>(
@@ -468,9 +534,14 @@ export function normalizeMaterialNodeGraph(
       const copied = copyNodeValue(value);
       if (copied !== undefined) values[key] = copied;
     }
+    const customLabel =
+      typeof candidate.label === "string" && candidate.label.trim()
+        ? candidate.label.trim()
+        : undefined;
     nodes.push({
       id: candidate.id,
       type: candidate.type as MaterialNodeType,
+      ...(customLabel ? { label: customLabel } : {}),
       position: { x, y },
       ...(candidate.collapsed ? { collapsed: true } : {}),
       values,
@@ -1028,21 +1099,40 @@ export function evaluateMaterialNodeGraph(
     emissionColor: fallback.emissiveColor ?? "#000000",
     emissionIntensity: fallback.emissiveIntensity ?? 0,
   };
-  if (errors.length > 0) {
-    return { ok: false, surface: fallbackSurface, errors };
-  }
-
   const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
   const outputNode = graph.nodes.find((node) => node.type === "material_output");
-  const outputLink = graph.links.find(
-    (link) => link.toNodeId === outputNode?.id && link.toSocket === "surface",
-  );
-  const principled = outputLink ? nodes.get(outputLink.fromNodeId) : undefined;
-  if (!principled || principled.type !== "principled_bsdf") {
+  const outputLink = outputNode
+    ? graph.links.find(
+        (link) => link.toNodeId === outputNode.id && link.toSocket === "surface",
+      )
+    : undefined;
+  const surfaceShader = outputLink ? nodes.get(outputLink.fromNodeId) : undefined;
+  const outputStatus: MaterialOutputStatus = !outputNode
+    ? "missing_output"
+    : !outputLink || !surfaceShader
+      ? "disconnected"
+      : surfaceShader.type !== "principled_bsdf" && surfaceShader.type !== "emission"
+        ? "invalid"
+        : "connected";
+  const hasConnectedOutput = outputStatus === "connected";
+
+  if (errors.length > 0) {
     return {
       ok: false,
+      hasConnectedOutput,
+      outputStatus,
       surface: fallbackSurface,
-      errors: ["La salida Surface debe estar conectada a un nodo Principled BSDF."],
+      errors,
+    };
+  }
+
+  if (!surfaceShader || (surfaceShader.type !== "principled_bsdf" && surfaceShader.type !== "emission")) {
+    return {
+      ok: false,
+      hasConnectedOutput: false,
+      outputStatus,
+      surface: fallbackSurface,
+      errors: ["La salida Surface debe estar conectada a un nodo shader (Principled BSDF o Emission)."],
     };
   }
 
@@ -1518,15 +1608,82 @@ export function evaluateMaterialNodeGraph(
     return asNumber(value, defaultValue);
   };
 
+  const clamp = (value: unknown, fallbackValue: number) =>
+    Math.max(0, Math.min(1, asNumber(value, fallbackValue)));
+
+  if (surfaceShader.type === "emission") {
+    const emissionColorIsProcedural = subtreeHasProceduralSource(surfaceShader, "color");
+    const emissionValue = inputValue(surfaceShader, "color");
+    const emissionImage =
+      isRecord(emissionValue) && emissionValue.kind === "image_texture"
+        ? emissionValue
+        : undefined;
+    const proceduralEmissionUrl = emissionColorIsProcedural
+      ? bakeProceduralSubtree(surfaceShader, "color", "color")
+      : undefined;
+    const emissionTextureUrl =
+      typeof emissionImage?.dataUrl === "string"
+        ? emissionImage.dataUrl
+        : proceduralEmissionUrl;
+    const emissionColor = emissionTextureUrl
+      ? "#ffffff"
+      : typeof emissionValue === "string"
+        ? emissionValue
+        : typeof surfaceShader.values.color === "string"
+          ? surfaceShader.values.color
+          : "#ffffff";
+    const emissionIntensity = Math.max(0, scalarInput(surfaceShader, "strength", 1));
+
+    if (unsupportedNodes.size > 0) {
+      return {
+        ok: false,
+        hasConnectedOutput: true,
+        outputStatus: "connected",
+        surface: fallbackSurface,
+        errors: Array.from(unsupportedNodes, (nodeId) => {
+          const node = nodes.get(nodeId);
+          const label =
+            MATERIAL_NODE_DEFINITIONS.find((definition) => definition.id === node?.type)?.label ??
+            nodeId;
+          return `El nodo ${label} aún no está disponible en el evaluador.`;
+        }),
+      };
+    }
+
+    return {
+      ok: true,
+      hasConnectedOutput: true,
+      outputStatus: "connected",
+      errors: [],
+      surface: {
+        baseColor: "#000000",
+        metallic: 0,
+        roughness: 1,
+        opacity: 1,
+        ior: 1.45,
+        specular: 0,
+        emissionColor,
+        emissionTextureUrl,
+        emissionIntensity,
+      },
+    };
+  }
+
+  const principled = surfaceShader;
   const baseColorIsProcedural = subtreeHasProceduralSource(principled, "baseColor");
   const roughnessIsProcedural = subtreeHasProceduralSource(principled, "roughness");
   const metallicIsProcedural = subtreeHasProceduralSource(principled, "metallic");
+  const emissionIsProcedural = subtreeHasProceduralSource(principled, "emission");
 
   const baseColorValue = inputValue(principled, "baseColor");
   const emissionValue = inputValue(principled, "emission");
   const baseColorTexture =
     isRecord(baseColorValue) && baseColorValue.kind === "image_texture"
       ? baseColorValue
+      : undefined;
+  const emissionImageTexture =
+    isRecord(emissionValue) && emissionValue.kind === "image_texture"
+      ? emissionValue
       : undefined;
   const proceduralBaseColorUrl = baseColorIsProcedural
     ? bakeProceduralSubtree(principled, "baseColor", "color")
@@ -1536,6 +1693,9 @@ export function evaluateMaterialNodeGraph(
     : undefined;
   const proceduralMetallicUrl = metallicIsProcedural
     ? bakeProceduralSubtree(principled, "metallic", "scalar")
+    : undefined;
+  const proceduralEmissionUrl = emissionIsProcedural
+    ? bakeProceduralSubtree(principled, "emission", "color")
     : undefined;
   const mappedTransform =
     baseColorTexture && isRecord(baseColorTexture.transform)
@@ -1565,14 +1725,21 @@ export function evaluateMaterialNodeGraph(
     };
   };
   const baseColor = typeof baseColorValue === "string" ? baseColorValue : fallbackSurface.baseColor;
-  const emissionColor =
-    typeof emissionValue === "string" ? emissionValue : fallbackSurface.emissionColor;
-  const clamp = (value: unknown, fallbackValue: number) =>
-    Math.max(0, Math.min(1, asNumber(value, fallbackValue)));
+  const emissionTextureUrl =
+    typeof emissionImageTexture?.dataUrl === "string"
+      ? emissionImageTexture.dataUrl
+      : proceduralEmissionUrl;
+  const emissionColor = emissionTextureUrl
+    ? "#ffffff"
+    : typeof emissionValue === "string"
+      ? emissionValue
+      : fallbackSurface.emissionColor;
   const ior = Math.max(1, Math.min(2.5, scalarInput(principled, "ior", 1.45)));
   if (unsupportedNodes.size > 0) {
     return {
       ok: false,
+      hasConnectedOutput: true,
+      outputStatus: "connected",
       surface: fallbackSurface,
       errors: Array.from(unsupportedNodes, (nodeId) => {
         const node = nodes.get(nodeId);
@@ -1586,6 +1753,8 @@ export function evaluateMaterialNodeGraph(
 
   return {
     ok: true,
+    hasConnectedOutput: true,
+    outputStatus: "connected",
     errors: [],
     surface: {
       baseColor,
@@ -1632,6 +1801,7 @@ export function evaluateMaterialNodeGraph(
       ior,
       specular: clamp(scalarInput(principled, "specular", 0.5), 0.5),
       emissionColor,
+      emissionTextureUrl,
       emissionIntensity: Math.max(0, scalarInput(principled, "emissionStrength", 0)),
     },
   };

@@ -1052,4 +1052,378 @@ describe("MaterialNodeEditor", () => {
     expect(latestGraph.nodes).toHaveLength(2);
     expect(latestGraph.links).toHaveLength(1);
   });
+
+  it("keeps SVG link paths anchored to socket centers under zoom, pan, and collapse/expand", () => {
+    const material = createMaterialAsset({ id: "zoom-align-material" });
+    const initialGraph = createDefaultMaterialNodeGraph(material);
+    let latestGraph = initialGraph;
+
+    const Harness = () => {
+      const [g, setG] = useState(initialGraph);
+      return (
+        <MaterialNodeEditor
+          material={material}
+          graph={g}
+          variant="canvas"
+          onBeginEdit={vi.fn()}
+          onChange={(next) => {
+            latestGraph = next;
+            setG(next);
+          }}
+        />
+      );
+    };
+
+    const { container } = render(<Harness />);
+    const viewport = screen.getByTestId("material-node-canvas-viewport");
+    const plane = container.querySelector(
+      'div[style*="transform: translate("]',
+    ) as HTMLElement;
+    expect(plane).not.toBeNull();
+
+    Object.defineProperty(viewport, "getBoundingClientRect", {
+      configurable: true,
+      value: () =>
+        ({
+          left: 40,
+          top: 20,
+          right: 1040,
+          bottom: 720,
+          width: 1000,
+          height: 700,
+          x: 40,
+          y: 20,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    });
+
+    // Simulate layout offset positions on socket pins relative to the node plane
+    const outPin = plane.querySelector(
+      '[data-socket-key$=":bsdf"]',
+    ) as HTMLElement;
+    const inPin = plane.querySelector(
+      '[data-socket-key$=":surface"]',
+    ) as HTMLElement;
+    expect(outPin).not.toBeNull();
+    expect(inPin).not.toBeNull();
+
+    const assignLocalOffsets = (el: HTMLElement, left: number, top: number) => {
+      Object.defineProperty(el, "offsetWidth", { configurable: true, value: 16 });
+      Object.defineProperty(el, "offsetHeight", { configurable: true, value: 16 });
+      Object.defineProperty(el, "offsetLeft", { configurable: true, value: left });
+      Object.defineProperty(el, "offsetTop", { configurable: true, value: top });
+      Object.defineProperty(el, "offsetParent", { configurable: true, value: plane });
+    };
+
+    assignLocalOffsets(outPin, 380, 180);
+    assignLocalOffsets(inPin, 512, 160);
+
+    // Zoom in and zoom out -> SVG link endpoints must stay anchored at (388, 188) -> (520, 168)
+    const zoomInBtn = screen.getByLabelText("Acercar el editor de nodos");
+    fireEvent.click(zoomInBtn);
+    fireEvent.click(zoomInBtn);
+
+    const linkBeforePan = screen.getByTestId("material-node-link");
+    const dAtZoom = linkBeforePan.getAttribute("d") ?? "";
+    expect(dAtZoom).toContain("M 388 188");
+    expect(dAtZoom).toContain("520 168");
+
+    // Pan the viewport by dragging empty space
+    fireEvent.pointerDown(viewport, { pointerId: 21, button: 0, clientX: 60, clientY: 60 });
+    fireEvent.pointerMove(viewport, { pointerId: 21, clientX: 190, clientY: 135 });
+    fireEvent.pointerUp(viewport, { pointerId: 21, button: 0, clientX: 190, clientY: 135 });
+
+    const dAfterPan = screen.getByTestId("material-node-link").getAttribute("d") ?? "";
+    expect(dAfterPan).toBe(dAtZoom);
+
+    // Collapse node via chevron button -> socket moves upward, path updates cleanly to new offset
+    assignLocalOffsets(outPin, 380, 148);
+    const collapseBtn = screen.getByLabelText("Contraer nodo Principled BSDF");
+    fireEvent.click(collapseBtn);
+    expect(latestGraph.nodes.find((n) => n.type === "principled_bsdf")?.collapsed).toBe(true);
+    const dCollapsed = screen.getByTestId("material-node-link").getAttribute("d") ?? "";
+    expect(dCollapsed).toContain("M 388 156");
+    expect(dCollapsed).toContain("520 168");
+  });
+
+  it("exposes LOOPA numeric bar sliders across Math, Bump, Normal Map, Mapping, Value Integer, Mix Float, and Emission", () => {
+    const material = createMaterialAsset({ id: "sliders-material" });
+    const initialGraph = createDefaultMaterialNodeGraph(material);
+    let latestGraph = initialGraph;
+
+    const Harness = () => {
+      const [g, setG] = useState(initialGraph);
+      return (
+        <MaterialNodeEditor
+          material={material}
+          graph={g}
+          variant="canvas"
+          onBeginEdit={vi.fn()}
+          onChange={(next) => {
+            latestGraph = next;
+            setG(next);
+          }}
+        />
+      );
+    };
+
+    render(<Harness />);
+    const addSelect = screen.getByLabelText("Tipo de nodo para añadir");
+
+    for (const type of [
+      "emission",
+      "math",
+      "normal_map",
+      "bump",
+      "mapping",
+      "value_integer",
+      "mix_float",
+    ] as const) {
+      fireEvent.change(addSelect, { target: { value: type } });
+    }
+
+    fireEvent.change(screen.getByLabelText("Deslizador Fuerza Emission"), {
+      target: { value: "4.25" },
+    });
+    expect(latestGraph.nodes.find((n) => n.type === "emission")?.values.strength).toBeCloseTo(4.25);
+
+    fireEvent.change(screen.getByLabelText("Deslizador Valor Math A"), {
+      target: { value: "0.75" },
+    });
+    expect(latestGraph.nodes.find((n) => n.type === "math")?.values.a).toBeCloseTo(0.75);
+
+    fireEvent.change(screen.getByLabelText("Deslizador Intensidad Normal Map"), {
+      target: { value: "1.6" },
+    });
+    expect(latestGraph.nodes.find((n) => n.type === "normal_map")?.values.strength).toBeCloseTo(1.6);
+
+    fireEvent.change(screen.getByLabelText("Deslizador Bump distancia"), {
+      target: { value: "0.35" },
+    });
+    expect(latestGraph.nodes.find((n) => n.type === "bump")?.values.distance).toBeCloseTo(0.35);
+
+    fireEvent.change(screen.getByLabelText("Deslizador Escala X"), {
+      target: { value: "2.5" },
+    });
+    expect(latestGraph.nodes.find((n) => n.type === "mapping")?.values.scale).toEqual([2.5, 1, 1]);
+
+    fireEvent.change(screen.getByLabelText("Deslizador Valor Integer"), {
+      target: { value: "12" },
+    });
+    expect(latestGraph.nodes.find((n) => n.type === "value_integer")?.values.value).toBe(12);
+
+    fireEvent.change(screen.getByLabelText("Deslizador Factor Mix Float"), {
+      target: { value: "0.8" },
+    });
+    expect(latestGraph.nodes.find((n) => n.type === "mix_float")?.values.factor).toBeCloseTo(0.8);
+  });
+
+  it("supports node header selection, double-tap/double-click inline rename preserving ID & links, duplicate, and delete", () => {
+    const material = createMaterialAsset({ id: "header-ops-material" });
+    const initialGraph = createDefaultMaterialNodeGraph(material);
+    let latestGraph = initialGraph;
+
+    const Harness = () => {
+      const [g, setG] = useState(initialGraph);
+      return (
+        <MaterialNodeEditor
+          material={material}
+          graph={g}
+          variant="canvas"
+          onBeginEdit={vi.fn()}
+          onChange={(next) => {
+            latestGraph = next;
+            setG(next);
+          }}
+        />
+      );
+    };
+
+    render(<Harness />);
+    const principledCard = screen
+      .getByRole("heading", { name: "Principled BSDF" })
+      .closest('[data-testid="material-node-card"]') as HTMLElement;
+    const titleEl = screen.getByRole("heading", { name: "Principled BSDF" });
+    const originalId = latestGraph.nodes[0].id;
+    const originalLinksSnapshot = JSON.stringify(latestGraph.links);
+
+    // Single tap on title selects node without collapsing it
+    fireEvent.pointerDown(titleEl, { pointerId: 10, button: 0, clientX: 140, clientY: 140 });
+    fireEvent.pointerUp(titleEl, { pointerId: 10, button: 0, clientX: 140, clientY: 140 });
+    expect(principledCard).toHaveAttribute("data-selected", "true");
+    expect(principledCard).toHaveAttribute("data-collapsed", "false");
+
+    // Double click on title opens inline rename input
+    fireEvent.doubleClick(titleEl);
+    const renameInput = screen.getByTestId("material-node-rename-input") as HTMLInputElement;
+    fireEvent.change(renameInput, { target: { value: "Madera Barnizada" } });
+    fireEvent.keyDown(renameInput, { key: "Enter" });
+
+    expect(screen.getByRole("heading", { name: "Madera Barnizada" })).toBeInTheDocument();
+    expect(latestGraph.nodes[0].id).toBe(originalId);
+    expect(latestGraph.nodes[0].label).toBe("Madera Barnizada");
+    expect(JSON.stringify(latestGraph.links)).toBe(originalLinksSnapshot);
+
+    // Double-tap on renamed title + Escape cancels without changing label
+    const renamedTitle = screen.getByRole("heading", { name: "Madera Barnizada" });
+    fireEvent.pointerDown(renamedTitle, { pointerId: 11, button: 0, clientX: 140, clientY: 140 });
+    fireEvent.pointerUp(renamedTitle, { pointerId: 11, button: 0, clientX: 140, clientY: 140 });
+    fireEvent.pointerDown(renamedTitle, { pointerId: 12, button: 0, clientX: 141, clientY: 140 });
+    fireEvent.pointerUp(renamedTitle, { pointerId: 12, button: 0, clientX: 141, clientY: 140 });
+
+    const secondRenameInput = screen.getByTestId("material-node-rename-input");
+    fireEvent.change(secondRenameInput, { target: { value: "Descartado" } });
+    fireEvent.keyDown(secondRenameInput, { key: "Escape" });
+    expect(screen.getByRole("heading", { name: "Madera Barnizada" })).toBeInTheDocument();
+    expect(latestGraph.nodes[0].label).toBe("Madera Barnizada");
+
+    // Chevron button collapses & expands explicitly
+    fireEvent.click(screen.getByLabelText("Contraer nodo Madera Barnizada"));
+    expect(principledCard).toHaveAttribute("data-collapsed", "true");
+    fireEvent.click(screen.getByLabelText("Expandir nodo Madera Barnizada"));
+    expect(principledCard).toHaveAttribute("data-collapsed", "false");
+
+    // Duplicate & delete from header buttons
+    fireEvent.click(screen.getByLabelText("Duplicar nodo Madera Barnizada"));
+    expect(latestGraph.nodes).toHaveLength(3);
+    expect(latestGraph.links).toHaveLength(1);
+
+    const dupDeleteBtns = screen.getAllByLabelText("Eliminar nodo Madera Barnizada");
+    fireEvent.click(dupDeleteBtns[1]);
+    expect(latestGraph.nodes).toHaveLength(2);
+    expect(latestGraph.links).toHaveLength(1);
+  });
+
+  it("supports multi-touch hold gestures for Shift (1-finger), Ctrl (2-finger), and Alt (3-finger) while suppressing Undo/Redo", () => {
+    const material = createMaterialAsset({ id: "multitouch-mods-material" });
+    const graph = createDefaultMaterialNodeGraph(material);
+    const onUndo = vi.fn();
+    const onRedo = vi.fn();
+    const onEffectiveModifiersChange = vi.fn();
+
+    vi.useFakeTimers();
+    try {
+      render(
+        <MaterialNodeEditor
+          material={material}
+          graph={graph}
+          variant="canvas"
+          canUndo
+          canRedo
+          onUndo={onUndo}
+          onRedo={onRedo}
+          onEffectiveModifiersChange={onEffectiveModifiersChange}
+          onBeginEdit={vi.fn()}
+          onChange={vi.fn()}
+        />,
+      );
+
+      const viewport = screen.getByTestId("material-node-canvas-viewport");
+
+      // 1-finger empty hold >= 260ms -> Shift active & cut trail armed; clears on release
+      fireEvent.pointerDown(viewport, { pointerId: 101, button: 0, clientX: 60, clientY: 60 });
+      act(() => {
+        vi.advanceTimersByTime(280);
+      });
+      expect(onEffectiveModifiersChange).toHaveBeenLastCalledWith({
+        shift: true,
+        ctrl: false,
+        alt: false,
+      });
+      fireEvent.pointerUp(viewport, { pointerId: 101, button: 0, clientX: 60, clientY: 60 });
+      expect(onEffectiveModifiersChange).toHaveBeenLastCalledWith({
+        shift: false,
+        ctrl: false,
+        alt: false,
+      });
+
+      // 2-finger hold >= 260ms -> Ctrl active & suppresses 2-finger Undo
+      fireEvent.pointerDown(viewport, { pointerId: 201, button: 0, clientX: 80, clientY: 80 });
+      fireEvent.pointerDown(viewport, { pointerId: 202, button: 0, clientX: 120, clientY: 80 });
+      act(() => {
+        vi.advanceTimersByTime(280);
+      });
+      expect(viewport).toHaveAttribute("data-ctrl-active", "true");
+      expect(onEffectiveModifiersChange).toHaveBeenLastCalledWith({
+        shift: false,
+        ctrl: true,
+        alt: false,
+      });
+      fireEvent.pointerUp(viewport, { pointerId: 201, button: 0, clientX: 80, clientY: 80 });
+      fireEvent.pointerUp(viewport, { pointerId: 202, button: 0, clientX: 120, clientY: 80 });
+      expect(onUndo).not.toHaveBeenCalled();
+      expect(viewport).toHaveAttribute("data-ctrl-active", "false");
+
+      // 3-finger hold >= 260ms -> Alt active & suppresses 3-finger Redo
+      fireEvent.pointerDown(viewport, { pointerId: 301, button: 0, clientX: 80, clientY: 80 });
+      fireEvent.pointerDown(viewport, { pointerId: 302, button: 0, clientX: 120, clientY: 80 });
+      fireEvent.pointerDown(viewport, { pointerId: 303, button: 0, clientX: 160, clientY: 80 });
+      act(() => {
+        vi.advanceTimersByTime(280);
+      });
+      expect(viewport).toHaveAttribute("data-alt-active", "true");
+      expect(onEffectiveModifiersChange).toHaveBeenLastCalledWith({
+        shift: false,
+        ctrl: false,
+        alt: true,
+      });
+      fireEvent.pointerUp(viewport, { pointerId: 301, button: 0, clientX: 80, clientY: 80 });
+      fireEvent.pointerUp(viewport, { pointerId: 302, button: 0, clientX: 120, clientY: 80 });
+      fireEvent.pointerUp(viewport, { pointerId: 303, button: 0, clientX: 160, clientY: 80 });
+      expect(onRedo).not.toHaveBeenCalled();
+      expect(viewport).toHaveAttribute("data-alt-active", "false");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("adds and connects the Emission shader node to Material Output in the canvas editor", () => {
+    const material = createMaterialAsset({ id: "emission-ui-material" });
+    const initialGraph = createDefaultMaterialNodeGraph(material);
+    let latestGraph = initialGraph;
+
+    const Harness = () => {
+      const [g, setG] = useState(initialGraph);
+      return (
+        <MaterialNodeEditor
+          material={material}
+          graph={g}
+          variant="canvas"
+          onBeginEdit={vi.fn()}
+          onChange={(next) => {
+            latestGraph = next;
+            setG(next);
+          }}
+        />
+      );
+    };
+
+    render(<Harness />);
+    fireEvent.change(screen.getByLabelText("Tipo de nodo para añadir"), {
+      target: { value: "emission" },
+    });
+
+    expect(screen.getByRole("heading", { name: "Emission" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Color Emission"), {
+      target: { value: "#33ddff" },
+    });
+
+    // Connect Emission -> Material Output Surface via output surface selector
+    const surfaceSelect = screen.getByLabelText("Material Output: Surface");
+    const emissionOption = Array.from(surfaceSelect.querySelectorAll("option")).find((option) =>
+      option.textContent?.includes("Emission · Emission"),
+    );
+    expect(emissionOption).toBeDefined();
+    fireEvent.change(surfaceSelect, { target: { value: emissionOption!.value } });
+
+    const emissionNode = latestGraph.nodes.find((n) => n.type === "emission")!;
+    expect(emissionNode.values.color).toBe("#33ddff");
+    expect(latestGraph.links).toContainEqual(
+      expect.objectContaining({
+        fromNodeId: emissionNode.id,
+        fromSocket: "emission",
+        toSocket: "surface",
+      }),
+    );
+  });
 });

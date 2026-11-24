@@ -26,6 +26,7 @@ import {
   TouchControlSettings,
   TouchModifierState,
   TransformTool,
+  ViewportProfile,
   WorkMode,
 } from '../core/project/types';
 import {
@@ -64,6 +65,7 @@ export interface Viewport3DHandle {
   captureThumbnail: () => string | null;
   resetCamera: () => void;
   getCameraState: () => TimelapseCameraState | null;
+  syncLiveMeshPreview: (objectId: string, nextMesh: EditableMesh) => void;
 }
 
 interface Viewport3DProps {
@@ -124,6 +126,7 @@ interface Viewport3DProps {
     after: EditableMesh,
   ) => void;
   sculptSettings?: SculptSettings;
+  onLiveSculptStroke?: (id: string, nextMesh: EditableMesh) => void;
   onCommitSculptStroke?: (id: string, nextMesh: EditableMesh) => void;
   onUpdateOperatorConfig: (config: EditOperatorParams) => void;
   onConfirmOperator: () => void;
@@ -194,6 +197,10 @@ interface Viewport3DProps {
   allowModifierComboMenus?: boolean;
   highlightedNgonObjectId?: string | null;
   highlightedNgonFaceIds?: string[];
+  viewportProfile?: ViewportProfile;
+  initialCameraPosition?: Vec3;
+  initialCameraTarget?: Vec3;
+  viewportLabel?: string;
 }
 
 export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
@@ -243,6 +250,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
       onCommitObjectTransforms,
       onCommitMeshEdit,
       sculptSettings,
+      onLiveSculptStroke,
       onCommitSculptStroke,
       onUpdateOperatorConfig,
       onConfirmOperator,
@@ -303,6 +311,10 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
       allowModifierComboMenus = true,
       highlightedNgonObjectId = null,
       highlightedNgonFaceIds = [],
+      viewportProfile = 'modeler',
+      initialCameraPosition,
+      initialCameraTarget,
+      viewportLabel,
     },
     ref,
   ) => {
@@ -441,6 +453,9 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
         getCameraState() {
           return engineRef.current?.getCameraState() ?? null;
         },
+        syncLiveMeshPreview(objectId: string, nextMesh: EditableMesh) {
+          engineRef.current?.syncLiveMeshPreview(objectId, nextMesh);
+        },
       }),
       [],
     );
@@ -555,6 +570,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
     onCommitObjectTransform,
     onCommitObjectTransforms,
     onCommitMeshEdit,
+    onLiveSculptStroke,
     onCommitSculptStroke,
     onChangeProportionalRadius,
     onCompleteModalTransform,
@@ -581,6 +597,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
     onCommitObjectTransform,
     onCommitObjectTransforms,
     onCommitMeshEdit,
+    onLiveSculptStroke,
     onCommitSculptStroke,
     onChangeProportionalRadius,
     onCompleteModalTransform,
@@ -591,49 +608,59 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
     const container = mountRef.current;
     if (!container) return;
 
-    const engine = new ViewportEngine(container, {
-      onSelectObject: (id, additive) =>
-        callbacksRef.current.onSelectObject(id, additive),
-      onBoxSelectObjects: (ids, additive) =>
-        callbacksRef.current.onBoxSelectObjects?.(ids, additive),
-      onSelectComponent: (id, additive, addOnly, ctrl) =>
-        callbacksRef.current.onSelectComponent(id, additive, addOnly, ctrl),
-      onBoxSelectComponents: (ids, additive) =>
-        callbacksRef.current.onBoxSelectComponents?.(ids, additive),
-      onBoxSelectOverlayChange: (overlay) => setBoxOverlay(overlay),
-      onPickLoopCutEdge: (edgeId) =>
-        callbacksRef.current.onPickLoopCutEdge(edgeId),
-      onLoopCutSlideDelta: (delta) =>
-        callbacksRef.current.onLoopCutSlideDelta(delta),
-      onTwoFingerUndo: () => callbacksRef.current.onTwoFingerUndo(),
-      onThreeFingerRedo: () => callbacksRef.current.onThreeFingerRedo(),
-      onOpenContextMenu: (info) =>
-        callbacksRef.current.onOpenContextMenu(info),
-      onModifierStateChange: (mods) =>
-        callbacksRef.current.onModifierStateChange(mods),
-      onAltTap: () => callbacksRef.current.onAltTap(),
-      onTrackballActiveChange: (active) =>
-        callbacksRef.current.onTrackballActiveChange(active),
-      onModalTransformStatusChange: (status) => setModalStatus(status),
-      onCompleteModalTransform: (committed) =>
-        callbacksRef.current.onCompleteModalTransform?.(committed),
-      onCameraPoseChange: (quat) =>
-        callbacksRef.current.onCameraPoseChange(quat),
-      onCameraMovementCommit: (cam, source) =>
-        callbacksRef.current.onCameraMovementCommit?.(cam, source),
-      onLiveObjectTransform: (id, transform) =>
-        callbacksRef.current.onLiveObjectTransform(id, transform),
-      onCommitObjectTransform: (id, before, after) =>
-        callbacksRef.current.onCommitObjectTransform(id, before, after),
-      onCommitObjectTransforms: (changes) =>
-        callbacksRef.current.onCommitObjectTransforms(changes),
-      onCommitMeshEdit: (id, before, after) =>
-        callbacksRef.current.onCommitMeshEdit(id, before, after),
-      onCommitSculptStroke: (id, nextMesh) =>
-        callbacksRef.current.onCommitSculptStroke?.(id, nextMesh),
-      onChangeProportionalRadius: (radius) =>
-        callbacksRef.current.onChangeProportionalRadius(radius),
-    });
+    const engine = new ViewportEngine(
+      container,
+      {
+        onSelectObject: (id, additive) =>
+          callbacksRef.current.onSelectObject(id, additive),
+        onBoxSelectObjects: (ids, additive) =>
+          callbacksRef.current.onBoxSelectObjects?.(ids, additive),
+        onSelectComponent: (id, additive, addOnly, ctrl) =>
+          callbacksRef.current.onSelectComponent(id, additive, addOnly, ctrl),
+        onBoxSelectComponents: (ids, additive) =>
+          callbacksRef.current.onBoxSelectComponents?.(ids, additive),
+        onBoxSelectOverlayChange: (overlay) => setBoxOverlay(overlay),
+        onPickLoopCutEdge: (edgeId) =>
+          callbacksRef.current.onPickLoopCutEdge(edgeId),
+        onLoopCutSlideDelta: (delta) =>
+          callbacksRef.current.onLoopCutSlideDelta(delta),
+        onTwoFingerUndo: () => callbacksRef.current.onTwoFingerUndo(),
+        onThreeFingerRedo: () => callbacksRef.current.onThreeFingerRedo(),
+        onOpenContextMenu: (info) =>
+          callbacksRef.current.onOpenContextMenu(info),
+        onModifierStateChange: (mods) =>
+          callbacksRef.current.onModifierStateChange(mods),
+        onAltTap: () => callbacksRef.current.onAltTap(),
+        onTrackballActiveChange: (active) =>
+          callbacksRef.current.onTrackballActiveChange(active),
+        onModalTransformStatusChange: (status) => setModalStatus(status),
+        onCompleteModalTransform: (committed) =>
+          callbacksRef.current.onCompleteModalTransform?.(committed),
+        onCameraPoseChange: (quat) =>
+          callbacksRef.current.onCameraPoseChange(quat),
+        onCameraMovementCommit: (cam, source) =>
+          callbacksRef.current.onCameraMovementCommit?.(cam, source),
+        onLiveObjectTransform: (id, transform) =>
+          callbacksRef.current.onLiveObjectTransform(id, transform),
+        onCommitObjectTransform: (id, before, after) =>
+          callbacksRef.current.onCommitObjectTransform(id, before, after),
+        onCommitObjectTransforms: (changes) =>
+          callbacksRef.current.onCommitObjectTransforms(changes),
+        onCommitMeshEdit: (id, before, after) =>
+          callbacksRef.current.onCommitMeshEdit(id, before, after),
+        onLiveSculptStroke: (id, nextMesh) =>
+          callbacksRef.current.onLiveSculptStroke?.(id, nextMesh),
+        onCommitSculptStroke: (id, nextMesh) =>
+          callbacksRef.current.onCommitSculptStroke?.(id, nextMesh),
+        onChangeProportionalRadius: (radius) =>
+          callbacksRef.current.onChangeProportionalRadius(radius),
+      },
+      {
+        initialCameraPosition,
+        initialCameraTarget,
+        viewportProfile,
+      },
+    );
     engineRef.current = engine;
 
     return () => {
@@ -708,6 +735,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
       sculptSettings,
       highlightedNgonObjectId,
       highlightedNgonFaceIds,
+      viewportProfile,
     });
   }, [
     objects,
@@ -734,6 +762,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
     modalCancelNonce,
     highlightedNgonObjectId,
     highlightedNgonFaceIds,
+    viewportProfile,
   ]);
 
   useEffect(() => {
@@ -785,12 +814,16 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
   }, [effectiveModifiers, onEffectiveModifiersChange]);
 
   const isCleanBlack = Boolean(settings.cleanBlackViewport);
+  const bgColorClass = isCleanBlack
+    ? 'bg-black'
+    : viewportProfile === 'materials'
+      ? 'bg-[#15181e]'
+      : 'bg-[#1d1f24]';
 
   return (
     <main
-      className={`relative flex-1 min-w-0 h-full flex flex-col overflow-hidden select-none ${
-        isCleanBlack ? 'bg-black' : 'bg-[#1d1f24]'
-      }`}
+      data-viewport-profile={viewportProfile}
+      className={`relative flex-1 min-w-0 h-full flex flex-col overflow-hidden select-none ${bgColorClass}`}
     >
       {/* Dedicated WebGL Mount Container */}
       <div
@@ -866,13 +899,18 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
 
         {/* Top-Right: Interactive Z-Up Orientation Gizmo & Camera Rotation Lock */}
         {!isCleanBlack && (
-          <div className="absolute top-3 right-3 z-15 pointer-events-none">
+          <div className="absolute top-3 right-3 z-15 pointer-events-none flex flex-col items-end gap-1.5">
             <AxisGizmoWidget
               ref={gizmoRef}
               cameraRotationLocked={cameraRotationLocked}
               onSelectPreset={handleSelectCameraPreset}
               onToggleCameraRotationLock={onToggleCameraRotationLock}
             />
+            {viewportLabel && (
+              <span className="rounded border border-[#2f3542] bg-[#14171d]/85 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-[#9aa3b2] backdrop-blur-sm">
+                {viewportLabel}
+              </span>
+            )}
           </div>
         )}
 

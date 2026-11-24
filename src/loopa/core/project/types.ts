@@ -62,9 +62,12 @@ export interface MaterialSlot {
   metalness: number;
 }
 
+export type ViewportProfile = 'modeler' | 'materials';
+
 export type MaterialNodeType =
   | 'material_output'
   | 'principled_bsdf'
+  | 'emission'
   | 'image_texture'
   | 'noise_texture'
   | 'voronoi_texture'
@@ -95,6 +98,7 @@ export type MaterialNodeValue =
 export interface MaterialNode {
   id: string;
   type: MaterialNodeType;
+  label?: string;
   position: { x: number; y: number };
   values: Record<string, MaterialNodeValue>;
   collapsed?: boolean;
